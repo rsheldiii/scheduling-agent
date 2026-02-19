@@ -26,7 +26,7 @@ This application will be, at it's core, a scheduling application. It will benefi
 
 There is one catch, however: realtime agents do not persist beyond the call, and it's feasible that a call would end while an agent was calling the calendar tool to set the appointment. we'll have to capture the transcript of the call while the call is happening, then spin up a regular agent with the call transcript to actually make the calendar event. This represents a paradigm shift from single-agent to multi-agent orchestration in our application, so we must handle it carefully.
 
-## texting integration (Status: TODO)
+## texting integration (Status: DONE)
 
 We already use Twilio, we should allow the user to text the application once it's running!
 

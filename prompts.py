@@ -41,6 +41,7 @@ def _load_prompts_from(directory: Path) -> dict[str, Prompt]:
 
 _incoming_prompts: dict[str, Prompt] = _load_prompts_from(_PROMPTS_DIR / "incoming")
 _outgoing_prompts: dict[str, Prompt] = _load_prompts_from(_PROMPTS_DIR / "outgoing")
+_sms_prompts: dict[str, Prompt] = _load_prompts_from(_PROMPTS_DIR / "sms")
 
 
 def get_incoming_prompt() -> Prompt:
@@ -55,6 +56,11 @@ def get_outgoing_prompt(key: str | None = None) -> Prompt:
         available = ", ".join(sorted(_outgoing_prompts.keys()))
         raise ValueError(f"Unknown outgoing prompt '{key}'. Available: {available}")
     return _outgoing_prompts[key]
+
+
+def get_sms_prompt() -> Prompt:
+    """Return the default SMS agent prompt."""
+    return _sms_prompts["default"]
 
 
 def list_outgoing_prompts() -> list[Prompt]:

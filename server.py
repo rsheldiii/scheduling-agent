@@ -10,7 +10,10 @@ from twilio.rest import Client as TwilioClient
 from agent_config import create_incoming_call_agent, create_outgoing_call_agent
 from post_call_agent import run_post_call_agent
 from prompts import list_outgoing_prompts
+from sms import send_sms
+from sms_agent import SmsAgentManager
 from twilio_handler import TwilioHandler
+from user_info import load_user_info
 
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
@@ -53,6 +56,22 @@ class TwilioWebSocketManager:
 
 manager = TwilioWebSocketManager()
 app = FastAPI()
+
+sms_manager: SmsAgentManager | None = None
+
+
+def _get_sms_manager() -> SmsAgentManager:
+    """Lazily initialize the SMS agent manager to avoid import-time side effects."""
+    global sms_manager
+    if sms_manager is None:
+        twilio_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        sms_manager = SmsAgentManager(
+            ws_manager=manager,
+            twilio_client=twilio_client,
+            phone_from=PHONE_NUMBER_FROM or "",
+            domain=DOMAIN,
+        )
+    return sms_manager
 
 
 @app.get("/")
@@ -121,6 +140,21 @@ async def outgoing_call(request: OutgoingCallRequest):
     return {"call_id": call_id, "call_sid": call.sid, "status": call.status}
 
 
+@app.post("/incoming-sms")
+async def incoming_sms(request: Request):
+    """Handle incoming Twilio SMS messages."""
+    form = await request.form()
+    from_number = form.get("From", "")
+    body = form.get("Body", "")
+    print(f"SMS from {from_number}: {body}")
+
+    mgr = _get_sms_manager()
+    reply = await mgr.handle_message(str(from_number), str(body))
+
+    twiml = f'<?xml version="1.0" encoding="UTF-8"?><Response><Message>{reply}</Message></Response>'
+    return PlainTextResponse(content=twiml, media_type="text/xml")
+
+
 async def _handle_media_stream(websocket: WebSocket, call_id: str | None = None):
     """Shared handler for Twilio Media Stream WebSocket connections."""
     handler: TwilioHandler | None = None
@@ -137,7 +171,10 @@ async def _handle_media_stream(websocket: WebSocket, call_id: str | None = None)
             transcript = handler.get_transcript()
             if transcript:
                 try:
-                    await run_post_call_agent(transcript)
+                    summary = await run_post_call_agent(transcript)
+                    user_phone = load_user_info().get("phone_number")
+                    if user_phone and summary:
+                        send_sms(user_phone, f"Call summary:\n{summary}")
                 except Exception as e:
                     print(f"Post-call agent error: {e}")
 
