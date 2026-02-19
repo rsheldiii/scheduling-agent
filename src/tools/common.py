@@ -18,3 +18,4 @@ def get_current_time() -> str:
 @function_tool
 def end_call() -> str:
     """End the call."""
+    return "The call has been ended."
