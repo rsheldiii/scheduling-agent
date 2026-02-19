@@ -5,12 +5,10 @@ import base64
 import json
 import os
 import time
-from datetime import datetime
 from typing import Any
 
 from fastapi import WebSocket
 
-from agents import function_tool
 from agents.realtime import (
     RealtimeAgent,
     RealtimePlaybackTracker,
@@ -20,42 +18,9 @@ from agents.realtime import (
 )
 
 
-@function_tool
-def get_weather(city: str) -> str:
-    """Get the weather in a city."""
-    return f"The weather in {city} is 69 degrees, with a 420% chance of rain."
-
-
-@function_tool
-def get_current_time() -> str:
-    """Get the current time."""
-    return f"The current time is {datetime.now().strftime('%H:%M:%S')}"
-
-@function_tool
-def end_call() -> str:
-    """End the call."""
-    
-
-
-
-agent = RealtimeAgent(
-    name="Twilio Assistant",
-    instructions="""
-You are Robert Sheldon. You are looking to book an appointment with {doctor_name}.
-You are 35 years old. your birthday is september 15th, 1989. The last four digits of your SSN are 6969.
-
-You will be connected to {doctor_practice}; you are looking to book an appointment with {doctor_name}.
-
-You are usually free any time Tuesday, Wednesday afternoon, or Thursday during lunch hours each week, but you are not free next Tuesday.
-
-Keep responses concise and friendly since this is a phone conversation. Don't open with too much information, just state your intention to book an appointment with the doctor and let the conversation flow naturally.
-""",
-    tools=[get_weather, get_current_time, end_call],
-)
-
-
 class TwilioHandler:
-    def __init__(self, twilio_websocket: WebSocket):
+    def __init__(self, twilio_websocket: WebSocket, agent: RealtimeAgent):
+        self.agent = agent
         self.twilio_websocket = twilio_websocket
         self._message_loop_task: asyncio.Task[None] | None = None
         self.session: RealtimeSession | None = None
@@ -78,7 +43,7 @@ class TwilioHandler:
 
     async def start(self) -> None:
         """Start the session."""
-        runner = RealtimeRunner(agent)
+        runner = RealtimeRunner(self.agent)
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise ValueError("OPENAI_API_KEY environment variable is required")
@@ -119,6 +84,8 @@ class TwilioHandler:
         try:
             async for event in self.session:
                 await self._handle_realtime_event(event)
+        except asyncio.CancelledError:
+            pass
         except Exception as e:
             print(f"Error in realtime session loop: {e}")
 
@@ -132,7 +99,10 @@ class TwilioHandler:
         except json.JSONDecodeError as e:
             print(f"Failed to parse Twilio message as JSON: {e}")
         except Exception as e:
-            print(f"Error in Twilio message loop: {e}")
+            print(f"Twilio message loop ended: {e}")
+        finally:
+            self._realtime_session_task.cancel()
+            self._buffer_flush_task.cancel()
 
     async def _handle_realtime_event(self, event: RealtimeSessionEvent) -> None:
         """Handle events from the realtime session."""
@@ -275,5 +245,7 @@ class TwilioHandler:
                 ):
                     await self._flush_audio_buffer()
 
+        except asyncio.CancelledError:
+            pass
         except Exception as e:
             print(f"Error in buffer flush loop: {e}")

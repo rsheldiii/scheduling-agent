@@ -11,3 +11,9 @@ openai-agents-python/
 
 # Virtual environments
 .venv
+
+# Secrets
+secrets.env
+
+# Plaintext user info (the .enc version is safe to commit)
+user_info.yaml

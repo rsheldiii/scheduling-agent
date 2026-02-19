@@ -1,5 +1,8 @@
 openai-agents
 fastapi
+twilio
 uvicorn[standard]
 websockets
 python-dotenv
+pyyaml
+cryptography
