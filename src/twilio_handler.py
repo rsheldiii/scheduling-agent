@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import os
 import time
 from typing import Any
@@ -16,6 +17,8 @@ from agents.realtime import (
     RealtimeSession,
     RealtimeSessionEvent,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class TwilioHandler:
@@ -70,7 +73,7 @@ class TwilioHandler:
         await self.session.enter()
 
         await self.twilio_websocket.accept()
-        print("Twilio WebSocket connection accepted")
+        logger.info("Twilio WebSocket connection accepted")
 
         self._realtime_session_task = asyncio.create_task(self._realtime_session_loop())
         self._message_loop_task = asyncio.create_task(self._twilio_message_loop())
@@ -90,7 +93,7 @@ class TwilioHandler:
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            print(f"Error in realtime session loop: {e}")
+            logger.error("Error in realtime session loop: %s", e)
 
     async def _twilio_message_loop(self) -> None:
         """Listen for messages from Twilio WebSocket and handle them."""
@@ -100,9 +103,9 @@ class TwilioHandler:
                 message = json.loads(message_text)
                 await self._handle_twilio_message(message)
         except json.JSONDecodeError as e:
-            print(f"Failed to parse Twilio message as JSON: {e}")
+            logger.error("Failed to parse Twilio message as JSON: %s", e)
         except Exception as e:
-            print(f"Twilio message loop ended: {e}")
+            logger.info("Twilio message loop ended: %s", e)
         finally:
             self._realtime_session_task.cancel()
             self._buffer_flush_task.cancel()
@@ -141,12 +144,12 @@ class TwilioHandler:
             )
 
         elif event.type == "audio_interrupted":
-            print("Sending audio interrupted to Twilio")
+            logger.debug("Sending audio interrupted to Twilio")
             await self.twilio_websocket.send_text(
                 json.dumps({"event": "clear", "streamSid": self._stream_sid})
             )
         elif event.type == "audio_end":
-            print("Audio end")
+            logger.debug("Audio end")
         elif event.type == "history_updated":
             self._history = list(event.history)
         elif event.type == "history_added":
@@ -162,19 +165,19 @@ class TwilioHandler:
             event = message.get("event")
 
             if event == "connected":
-                print("Twilio media stream connected")
+                logger.info("Twilio media stream connected")
             elif event == "start":
                 start_data = message.get("start", {})
                 self._stream_sid = start_data.get("streamSid")
-                print(f"Media stream started with SID: {self._stream_sid}")
+                logger.info("Media stream started with SID: %s", self._stream_sid)
             elif event == "media":
                 await self._handle_media_event(message)
             elif event == "mark":
                 await self._handle_mark_event(message)
             elif event == "stop":
-                print("Media stream stopped")
+                logger.info("Media stream stopped")
         except Exception as e:
-            print(f"Error handling Twilio message: {e}")
+            logger.error("Error handling Twilio message: %s", e)
 
     async def _handle_media_event(self, message: dict[str, Any]) -> None:
         """Handle audio data from Twilio - buffer it before sending to OpenAI."""
@@ -194,7 +197,7 @@ class TwilioHandler:
                     await self._flush_audio_buffer()
 
             except Exception as e:
-                print(f"Error processing audio from Twilio: {e}")
+                logger.error("Error processing audio from Twilio: %s", e)
 
     async def _handle_mark_event(self, message: dict[str, Any]) -> None:
         """Handle mark events from Twilio to update playback tracker."""
@@ -211,15 +214,16 @@ class TwilioHandler:
 
                 # Update playback tracker
                 self.playback_tracker.on_play_bytes(item_id, item_content_index, audio_bytes)
-                print(
-                    f"Playback tracker updated: {item_id}, index {item_content_index}, {byte_count} bytes"
+                logger.debug(
+                    "Playback tracker updated: %s, index %s, %s bytes",
+                    item_id, item_content_index, byte_count,
                 )
 
                 # Clean up the stored data
                 del self._mark_data[mark_id]
 
         except Exception as e:
-            print(f"Error handling mark event: {e}")
+            logger.error("Error handling mark event: %s", e)
 
     def get_transcript(self) -> str:
         """Format captured history into a human-readable transcript."""
@@ -252,7 +256,7 @@ class TwilioHandler:
             self._last_buffer_send_time = time.time()
 
         except Exception as e:
-            print(f"Error sending buffered audio to OpenAI: {e}")
+            logger.error("Error sending buffered audio to OpenAI: %s", e)
 
     async def _buffer_flush_loop(self) -> None:
         """Periodically flush audio buffer to prevent stale data."""
@@ -271,4 +275,4 @@ class TwilioHandler:
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            print(f"Error in buffer flush loop: {e}")
+            logger.error("Error in buffer flush loop: %s", e)

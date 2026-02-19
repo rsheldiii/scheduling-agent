@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import re
 import sys
@@ -18,6 +19,8 @@ _PLAINTEXT_PATH = _PROJECT_ROOT / "user_info.yaml"
 _ENCRYPTED_PATH = _PROJECT_ROOT / "user_info.yaml.enc"
 _ENV_VAR = "USER_INFO_SECRET"
 _PBKDF2_ITERATIONS = 600_000
+
+logger = logging.getLogger(__name__)
 
 _cached_user_info: dict[str, str] | None = None
 
@@ -53,7 +56,7 @@ def encrypt_file(
         "data": token.decode(),
     }
     encrypted_path.write_text(json.dumps(payload, indent=2))
-    print(f"Encrypted {plaintext_path} -> {encrypted_path}")
+    logger.info("Encrypted %s -> %s", plaintext_path, encrypted_path)
 
 
 def decrypt_and_load(
@@ -87,14 +90,14 @@ def load_user_info() -> dict[str, str]:
         return _cached_user_info
 
     if not _ENCRYPTED_PATH.exists():
-        print(f"Warning: {_ENCRYPTED_PATH} not found — user info unavailable")
+        logger.warning("%s not found — user info unavailable", _ENCRYPTED_PATH)
         _cached_user_info = {}
         return _cached_user_info
 
     try:
         _cached_user_info = decrypt_and_load()
     except Exception as e:
-        print(f"Warning: could not load user info: {e}")
+        logger.warning("Could not load user info: %s", e)
         _cached_user_info = {}
 
     return _cached_user_info

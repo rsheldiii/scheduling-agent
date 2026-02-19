@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 import uuid
@@ -14,6 +15,8 @@ from .prompts import list_outgoing_prompts
 from .sms import send_sms
 from .twilio_handler import TwilioHandler
 from .tools.user_info import load_user_info
+
+logger = logging.getLogger(__name__)
 
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
@@ -45,10 +48,10 @@ class TwilioWebSocketManager:
         if call_id and call_id in self._pending_calls:
             context = self._pending_calls.pop(call_id)
             prompt_key = context.get("prompt")
-            print(f"Creating outgoing call handler (call_id={call_id}, to={context.get('to')}, prompt={prompt_key})")
+            logger.info("Creating outgoing call handler (call_id=%s, to=%s, prompt=%s)", call_id, context.get("to"), prompt_key)
             agent = create_outgoing_call_agent(prompt_key=prompt_key)
         else:
-            print("Creating incoming call handler")
+            logger.info("Creating incoming call handler")
             agent = create_incoming_call_agent()
 
         return TwilioHandler(websocket, agent)
@@ -135,7 +138,7 @@ async def outgoing_call(request: OutgoingCallRequest):
         twiml=outbound_twiml,
     )
 
-    print(f"Outgoing call initiated: call_id={call_id}, call_sid={call.sid}, to={request.to}")
+    logger.info("Outgoing call initiated: call_id=%s, call_sid=%s, to=%s", call_id, call.sid, request.to)
 
     return {"call_id": call_id, "call_sid": call.sid, "status": call.status}
 
@@ -146,7 +149,7 @@ async def incoming_sms(request: Request):
     form = await request.form()
     from_number = form.get("From", "")
     body = form.get("Body", "")
-    print(f"SMS from {from_number}: {body}")
+    logger.info("SMS from %s: %s", from_number, body)
 
     mgr = _get_sms_manager()
     reply = await mgr.handle_message(str(from_number), str(body))
@@ -163,9 +166,9 @@ async def _handle_media_stream(websocket: WebSocket, call_id: str | None = None)
         await handler.start()
         await handler.wait_until_done()
     except WebSocketDisconnect:
-        print("WebSocket disconnected")
+        logger.info("WebSocket disconnected")
     except Exception as e:
-        print(f"WebSocket error: {e}")
+        logger.error("WebSocket error: %s", e)
     finally:
         if handler is not None:
             transcript = handler.get_transcript()
@@ -176,7 +179,7 @@ async def _handle_media_stream(websocket: WebSocket, call_id: str | None = None)
                     if user_phone and summary:
                         send_sms(user_phone, f"Call summary:\n{summary}")
                 except Exception as e:
-                    print(f"Post-call agent error: {e}")
+                    logger.error("Post-call agent error: %s", e)
 
 
 @app.websocket("/media-stream")
