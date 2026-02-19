@@ -4,6 +4,7 @@ import uuid
 from typing import Any
 
 from agents import function_tool
+from twilio.twiml.voice_response import Connect, VoiceResponse
 
 
 def build_sms_tools(
@@ -32,15 +33,13 @@ def build_sms_tools(
         call_id = str(uuid.uuid4())
         ws_manager.register_pending_call(call_id, {"to": to, "prompt": prompt})
 
-        outbound_twiml = (
-            f'<?xml version="1.0" encoding="UTF-8"?>'
-            f"<Response><Connect>"
-            f'<Stream url="wss://{domain}/media-stream/{call_id}" />'
-            f"</Connect></Response>"
-        )
+        response = VoiceResponse()
+        connect = Connect()
+        connect.stream(url=f"wss://{domain}/media-stream/{call_id}")
+        response.append(connect)
 
         call = twilio_client.calls.create(
-            from_=phone_from, to=to, twiml=outbound_twiml
+            from_=phone_from, to=to, twiml=str(response)
         )
         return f"Call initiated (sid={call.sid}, status={call.status}). The user will receive a summary when the call completes."
 

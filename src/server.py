@@ -8,6 +8,8 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 from twilio.rest import Client as TwilioClient
+from twilio.twiml.messaging_response import MessagingResponse
+from twilio.twiml.voice_response import Connect, VoiceResponse
 
 from .agent_factory.realtime import create_incoming_call_agent, create_outgoing_call_agent
 from .agent_factory.post_call import run_post_call_agent
@@ -109,14 +111,12 @@ async def incoming_call(request: Request):
     """Handle incoming Twilio phone calls."""
     host = request.headers.get("Host")
 
-    twiml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Say>Hello! You're now connected to an AI assistant. You can start talking!</Say>
-    <Connect>
-        <Stream url="wss://{host}/media-stream" />
-    </Connect>
-</Response>"""
-    return PlainTextResponse(content=twiml_response, media_type="text/xml")
+    response = VoiceResponse()
+    response.say("Hello! You're now connected to an AI assistant. You can start talking!")
+    connect = Connect()
+    connect.stream(url=f"wss://{host}/media-stream")
+    response.append(connect)
+    return PlainTextResponse(content=str(response), media_type="text/xml")
 
 
 @app.post("/outgoing-call")
@@ -138,17 +138,15 @@ async def outgoing_call(request: OutgoingCallRequest):
 
     twilio_client = TwilioClient(cfg["twilio_account_sid"], cfg["twilio_auth_token"])
 
-    outbound_twiml = (
-        f'<?xml version="1.0" encoding="UTF-8"?>'
-        f"<Response><Connect>"
-        f'<Stream url="wss://{cfg["domain"]}/media-stream/{call_id}" />'
-        f"</Connect></Response>"
-    )
+    response = VoiceResponse()
+    connect = Connect()
+    connect.stream(url=f"wss://{cfg['domain']}/media-stream/{call_id}")
+    response.append(connect)
 
     call = twilio_client.calls.create(
         from_=cfg["phone_number_from"],
         to=request.to,
-        twiml=outbound_twiml,
+        twiml=str(response),
     )
 
     logger.info("Outgoing call initiated: call_id=%s, call_sid=%s, to=%s", call_id, call.sid, request.to)
@@ -167,8 +165,9 @@ async def incoming_sms(request: Request):
     mgr = _get_sms_manager()
     reply = await mgr.handle_message(str(from_number), str(body))
 
-    twiml = f'<?xml version="1.0" encoding="UTF-8"?><Response><Message>{reply}</Message></Response>'
-    return PlainTextResponse(content=twiml, media_type="text/xml")
+    response = MessagingResponse()
+    response.message(reply)
+    return PlainTextResponse(content=str(response), media_type="text/xml")
 
 
 async def _handle_media_stream(websocket: WebSocket, call_id: str | None = None):
