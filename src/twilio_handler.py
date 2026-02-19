@@ -22,17 +22,16 @@ logger = logging.getLogger(__name__)
 
 
 class TwilioHandler:
+    CHUNK_LENGTH_S = 0.05
+    SAMPLE_RATE = 8000
+    BUFFER_SIZE_BYTES = int(SAMPLE_RATE * CHUNK_LENGTH_S)
+
     def __init__(self, twilio_websocket: WebSocket, agent: RealtimeAgent):
         self.agent = agent
         self.twilio_websocket = twilio_websocket
         self._message_loop_task: asyncio.Task[None] | None = None
         self.session: RealtimeSession | None = None
         self.playback_tracker = RealtimePlaybackTracker()
-
-        # Audio buffering configuration (matching CLI demo)
-        self.CHUNK_LENGTH_S = 0.05  # 50ms chunks like CLI demo
-        self.SAMPLE_RATE = 8000  # Twilio uses 8kHz for g711_ulaw
-        self.BUFFER_SIZE_BYTES = int(self.SAMPLE_RATE * self.CHUNK_LENGTH_S)  # 50ms worth of audio
 
         self._stream_sid: str | None = None
         self._audio_buffer: bytearray = bytearray()
