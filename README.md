@@ -4,7 +4,8 @@ An agentic appointment-scheduling application that connects the OpenAI Realtime 
 
 ## Prerequisites
 
-- Python 3.9+
+- Python 3.12+
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) package manager
 - OpenAI API key with [Realtime API](https://platform.openai.com/docs/guides/realtime) access
 - [Twilio](https://www.twilio.com/docs/voice) account with a phone number
 - A tunneling service like [ngrok](https://ngrok.com/) to expose your local server
@@ -15,7 +16,7 @@ An agentic appointment-scheduling application that connects the OpenAI Realtime 
 1. **Install dependencies:**
 
     ```bash
-    pip install -r requirements.txt
+    uv sync
     ```
 
 2. **Configure secrets.** Copy the template and fill in your values:
@@ -34,13 +35,13 @@ An agentic appointment-scheduling application that connects the OpenAI Realtime 
 3. **Set up user info.** Edit `user_info.yaml` with your details (including `phone_number` for SMS summaries), then encrypt:
 
     ```bash
-    python user_info.py encrypt
+    uv run python user_info.py encrypt
     ```
 
 4. **Start the server:**
 
     ```bash
-    python main.py
+    uv run python main.py
     ```
 
 5. **Expose the server publicly:**
@@ -108,7 +109,7 @@ Build and run with Docker Compose:
 docker compose up --build
 ```
 
-This mounts `secrets.env`, `user_info.yaml.enc`, and `credentials.json` at runtime so secrets are never baked into the image.
+This mounts `secrets.env`, `user_info.yaml.enc`, and `credentials.json` at runtime so secrets are never baked into the image. The Dockerfile uses [uv](https://docs.astral.sh/uv/) for fast, reproducible installs.
 
 To build the image standalone:
 

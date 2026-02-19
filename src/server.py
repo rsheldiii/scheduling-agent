@@ -7,13 +7,13 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 from twilio.rest import Client as TwilioClient
 
-from agent_config import create_incoming_call_agent, create_outgoing_call_agent
-from post_call_agent import run_post_call_agent
-from prompts import list_outgoing_prompts
-from sms import send_sms
-from sms_agent import SmsAgentManager
-from twilio_handler import TwilioHandler
-from user_info import load_user_info
+from .agent_factory.realtime import create_incoming_call_agent, create_outgoing_call_agent
+from .agent_factory.post_call import run_post_call_agent
+from .agent_factory.sms import SmsAgentManager
+from .prompts import list_outgoing_prompts
+from .sms import send_sms
+from .twilio_handler import TwilioHandler
+from .tools.user_info import load_user_info
 
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")

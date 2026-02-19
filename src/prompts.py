@@ -5,7 +5,7 @@ from pathlib import Path
 
 import yaml
 
-_PROMPTS_DIR = Path(__file__).parent / "prompts"
+_PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 _DEFAULT_OUTGOING_KEY = "doctor_appointment"
 
 

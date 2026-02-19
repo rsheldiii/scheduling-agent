@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from agents.realtime import RealtimeAgent
 
-from prompts import get_incoming_prompt, get_outgoing_prompt
-from tools import end_call, get_current_time, get_user_info, get_weather
-from user_info import load_user_info, render_template
+from ..prompts import get_incoming_prompt, get_outgoing_prompt
+from ..tools.common import end_call, get_current_time, get_weather
+from ..tools.user_info import get_user_info, load_user_info, render_template
 
 _user_info = load_user_info()
 

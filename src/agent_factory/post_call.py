@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from agents import Agent, Runner
 
-from google_calendar import create_calendar_event
+from ..tools.google_calendar import create_calendar_event
 
 _POST_CALL_INSTRUCTIONS = """\
 You are a post-call processing agent. You receive the transcript of a phone call

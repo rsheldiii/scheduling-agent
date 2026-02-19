@@ -1,9 +1,9 @@
 [project]
-name = "openai-agent"
+name = "scheduling-agent"
 version = "0.1.0"
-description = "Add your description here"
+description = "Agentic appointment-scheduling app connecting OpenAI Realtime API to phone calls via Twilio"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.12"
 dependencies = [
     "cryptography>=44.0",
     "fastapi>=0.116.1",

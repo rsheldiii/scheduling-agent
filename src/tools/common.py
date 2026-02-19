@@ -16,18 +16,5 @@ def get_current_time() -> str:
 
 
 @function_tool
-def get_user_info(field: str) -> str:
-    """Look up a piece of personal information about the user, such as
-    'name', 'date_of_birth', 'ssn_last_four', etc."""
-    from user_info import load_user_info
-
-    info = load_user_info()
-    if field in info:
-        return str(info[field])
-    available = ", ".join(sorted(info.keys()))
-    return f"No information found for '{field}'. Available fields: {available}"
-
-
-@function_tool
 def end_call() -> str:
     """End the call."""

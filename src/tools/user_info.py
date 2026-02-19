@@ -8,12 +8,14 @@ import sys
 from pathlib import Path
 
 import yaml
+from agents import function_tool
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives.hashes import SHA256
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
-_PLAINTEXT_PATH = Path(__file__).parent / "user_info.yaml"
-_ENCRYPTED_PATH = Path(__file__).parent / "user_info.yaml.enc"
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_PLAINTEXT_PATH = _PROJECT_ROOT / "user_info.yaml"
+_ENCRYPTED_PATH = _PROJECT_ROOT / "user_info.yaml.enc"
 _ENV_VAR = "USER_INFO_SECRET"
 _PBKDF2_ITERATIONS = 600_000
 
@@ -109,6 +111,17 @@ def render_template(template: str, user_info: dict[str, str]) -> str:
         return user_info[key] if key in user_info else match.group(0)
 
     return re.sub(r"\{(\w+)\}", replacer, template)
+
+
+@function_tool
+def get_user_info(field: str) -> str:
+    """Look up a piece of personal information about the user, such as
+    'name', 'date_of_birth', 'ssn_last_four', etc."""
+    info = load_user_info()
+    if field in info:
+        return str(info[field])
+    available = ", ".join(sorted(info.keys()))
+    return f"No information found for '{field}'. Available fields: {available}"
 
 
 def _cli() -> None:
