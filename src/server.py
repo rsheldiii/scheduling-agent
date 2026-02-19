@@ -200,26 +200,25 @@ async def incoming_sms(request: Request):
 
 async def _handle_media_stream(websocket: WebSocket, call_id: str | None = None):
     """Shared handler for Twilio Media Stream WebSocket connections."""
-    handler: TwilioHandler | None = None
+    handler = await manager.new_session(websocket, call_id=call_id)
     try:
-        handler = await manager.new_session(websocket, call_id=call_id)
-        await handler.start()
-        await handler.wait_until_done()
+        async with handler:
+            await handler.wait_until_done()
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected")
     except Exception as e:
         logger.error("WebSocket error: %s", e)
     finally:
-        if handler is not None:
-            transcript = handler.get_transcript()
-            if transcript:
-                try:
-                    summary = await run_post_call_agent(transcript)
-                    user_phone = load_user_info().get("phone_number")
-                    if user_phone and summary:
-                        send_sms(user_phone, f"Call summary:\n{summary}")
-                except Exception as e:
-                    logger.error("Post-call agent error: %s", e)
+        await handler.cleanup()
+        transcript = handler.get_transcript()
+        if transcript:
+            try:
+                summary = await run_post_call_agent(transcript)
+                user_phone = load_user_info().get("phone_number")
+                if user_phone and summary:
+                    send_sms(user_phone, f"Call summary:\n{summary}")
+            except Exception as e:
+                logger.error("Post-call agent error: %s", e)
 
 
 @app.websocket("/media-stream")

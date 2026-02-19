@@ -29,25 +29,84 @@ class TwilioHandler:
     def __init__(self, twilio_websocket: WebSocket, agent: RealtimeAgent):
         self.agent = agent
         self.twilio_websocket = twilio_websocket
-        self._message_loop_task: asyncio.Task[None] | None = None
         self.session: RealtimeSession | None = None
         self.playback_tracker = RealtimePlaybackTracker()
+
+        self._realtime_session_task: asyncio.Task[None] | None = None
+        self._message_loop_task: asyncio.Task[None] | None = None
+        self._buffer_flush_task: asyncio.Task[None] | None = None
 
         self._stream_sid: str | None = None
         self._audio_buffer: bytearray = bytearray()
         self._last_buffer_send_time = time.time()
 
-        # Mark event tracking for playback
         self._mark_counter = 0
         self._mark_data: dict[
             str, tuple[str, int, int]
-        ] = {}  # mark_id -> (item_id, content_index, byte_count)
+        ] = {}
 
-        # Transcript capture — latest history snapshot from the realtime session
         self._history: list[Any] = []
 
+    # ------------------------------------------------------------------
+    # Async context manager
+    # ------------------------------------------------------------------
+
+    async def __aenter__(self) -> TwilioHandler:
+        await self._setup_session()
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: Any,
+    ) -> None:
+        await self._cancel_tasks()
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
     async def start(self) -> None:
-        """Start the session."""
+        """Set up the session and spawn background tasks.
+
+        Prefer using the async context manager (``async with handler:``)
+        which guarantees cleanup.  If you call ``start()`` directly, you
+        are responsible for calling ``cleanup()`` afterwards.
+        """
+        await self._setup_session()
+
+    async def wait_until_done(self) -> None:
+        """Block until the Twilio message loop terminates."""
+        if self._message_loop_task is not None:
+            await self._message_loop_task
+
+    async def cleanup(self) -> None:
+        """Cancel all background tasks.  Safe to call multiple times."""
+        await self._cancel_tasks()
+
+    def get_transcript(self) -> str:
+        """Format captured history into a human-readable transcript."""
+        lines: list[str] = []
+        for item in self._history:
+            if not hasattr(item, "role") or not hasattr(item, "content"):
+                continue
+            role = "User" if item.role == "user" else "Assistant"
+            parts: list[str] = []
+            for entry in item.content:
+                text = getattr(entry, "transcript", None) or getattr(entry, "text", None)
+                if text:
+                    parts.append(text)
+            if parts:
+                lines.append(f"{role}: {' '.join(parts)}")
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    async def _setup_session(self) -> None:
+        """Create the realtime session and spawn the three background tasks."""
         runner = RealtimeRunner(self.agent)
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
@@ -70,18 +129,45 @@ class TwilioHandler:
         )
 
         await self.session.enter()
-
         await self.twilio_websocket.accept()
         logger.info("Twilio WebSocket connection accepted")
 
-        self._realtime_session_task = asyncio.create_task(self._realtime_session_loop())
-        self._message_loop_task = asyncio.create_task(self._twilio_message_loop())
-        self._buffer_flush_task = asyncio.create_task(self._buffer_flush_loop())
+        # Spawn tasks with structured cleanup: if any creation fails,
+        # already-created tasks are cancelled before re-raising.
+        tasks_created: list[asyncio.Task[None]] = []
+        try:
+            task = asyncio.create_task(self._realtime_session_loop())
+            self._realtime_session_task = task
+            tasks_created.append(task)
 
-    async def wait_until_done(self) -> None:
-        """Wait until the session is done."""
-        assert self._message_loop_task is not None
-        await self._message_loop_task
+            task = asyncio.create_task(self._twilio_message_loop())
+            self._message_loop_task = task
+            tasks_created.append(task)
+
+            task = asyncio.create_task(self._buffer_flush_loop())
+            self._buffer_flush_task = task
+            tasks_created.append(task)
+        except Exception:
+            for t in tasks_created:
+                t.cancel()
+            raise
+
+    async def _cancel_tasks(self) -> None:
+        """Cancel all background tasks and wait for them to finish."""
+        tasks = [
+            self._realtime_session_task,
+            self._message_loop_task,
+            self._buffer_flush_task,
+        ]
+        live = [t for t in tasks if t is not None and not t.done()]
+        for t in live:
+            t.cancel()
+        if live:
+            await asyncio.gather(*live, return_exceptions=True)
+
+    # ------------------------------------------------------------------
+    # Event loops
+    # ------------------------------------------------------------------
 
     async def _realtime_session_loop(self) -> None:
         """Listen for events from the realtime session."""
@@ -103,11 +189,30 @@ class TwilioHandler:
                 await self._handle_twilio_message(message)
         except json.JSONDecodeError as e:
             logger.error("Failed to parse Twilio message as JSON: %s", e)
+        except asyncio.CancelledError:
+            pass
         except Exception as e:
             logger.info("Twilio message loop ended: %s", e)
-        finally:
-            self._realtime_session_task.cancel()
-            self._buffer_flush_task.cancel()
+
+    async def _buffer_flush_loop(self) -> None:
+        """Periodically flush audio buffer to prevent stale data."""
+        try:
+            while True:
+                await asyncio.sleep(self.CHUNK_LENGTH_S)
+                current_time = time.time()
+                if (
+                    self._audio_buffer
+                    and current_time - self._last_buffer_send_time > self.CHUNK_LENGTH_S * 2
+                ):
+                    await self._flush_audio_buffer()
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error("Error in buffer flush loop: %s", e)
+
+    # ------------------------------------------------------------------
+    # Event handlers
+    # ------------------------------------------------------------------
 
     async def _handle_realtime_event(self, event: RealtimeSessionEvent) -> None:
         """Handle events from the realtime session."""
@@ -123,7 +228,6 @@ class TwilioHandler:
                 )
             )
 
-            # Send mark event for playback tracking
             self._mark_counter += 1
             mark_id = str(self._mark_counter)
             self._mark_data[mark_id] = (
@@ -185,13 +289,9 @@ class TwilioHandler:
 
         if payload:
             try:
-                # Decode base64 audio from Twilio (µ-law format)
                 ulaw_bytes = base64.b64decode(payload)
-
-                # Add original µ-law to buffer for OpenAI (they expect µ-law)
                 self._audio_buffer.extend(ulaw_bytes)
 
-                # Send buffered audio if we have enough data
                 if len(self._audio_buffer) >= self.BUFFER_SIZE_BYTES:
                     await self._flush_audio_buffer()
 
@@ -204,41 +304,18 @@ class TwilioHandler:
             mark_data = message.get("mark", {})
             mark_id = mark_data.get("name", "")
 
-            # Look up stored data for this mark ID
             if mark_id in self._mark_data:
                 item_id, item_content_index, byte_count = self._mark_data[mark_id]
-
-                # Convert byte count back to bytes for playback tracker
-                audio_bytes = b"\x00" * byte_count  # Placeholder bytes
-
-                # Update playback tracker
+                audio_bytes = b"\x00" * byte_count
                 self.playback_tracker.on_play_bytes(item_id, item_content_index, audio_bytes)
                 logger.debug(
                     "Playback tracker updated: %s, index %s, %s bytes",
                     item_id, item_content_index, byte_count,
                 )
-
-                # Clean up the stored data
                 del self._mark_data[mark_id]
 
         except Exception as e:
             logger.error("Error handling mark event: %s", e)
-
-    def get_transcript(self) -> str:
-        """Format captured history into a human-readable transcript."""
-        lines: list[str] = []
-        for item in self._history:
-            if not hasattr(item, "role") or not hasattr(item, "content"):
-                continue
-            role = "User" if item.role == "user" else "Assistant"
-            parts: list[str] = []
-            for entry in item.content:
-                text = getattr(entry, "transcript", None) or getattr(entry, "text", None)
-                if text:
-                    parts.append(text)
-            if parts:
-                lines.append(f"{role}: {' '.join(parts)}")
-        return "\n".join(lines)
 
     async def _flush_audio_buffer(self) -> None:
         """Send buffered audio to OpenAI."""
@@ -246,32 +323,9 @@ class TwilioHandler:
             return
 
         try:
-            # Send the buffered audio
             buffer_data = bytes(self._audio_buffer)
             await self.session.send_audio(buffer_data)
-
-            # Clear the buffer
             self._audio_buffer.clear()
             self._last_buffer_send_time = time.time()
-
         except Exception as e:
             logger.error("Error sending buffered audio to OpenAI: %s", e)
-
-    async def _buffer_flush_loop(self) -> None:
-        """Periodically flush audio buffer to prevent stale data."""
-        try:
-            while True:
-                await asyncio.sleep(self.CHUNK_LENGTH_S)  # Check every 50ms
-
-                # If buffer has data and it's been too long since last send, flush it
-                current_time = time.time()
-                if (
-                    self._audio_buffer
-                    and current_time - self._last_buffer_send_time > self.CHUNK_LENGTH_S * 2
-                ):
-                    await self._flush_audio_buffer()
-
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            logger.error("Error in buffer flush loop: %s", e)
