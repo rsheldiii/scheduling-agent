@@ -34,5 +34,6 @@ def send_sms(to: str, body: str, client: TwilioClient | None = None) -> str:
         raise RuntimeError("PHONE_NUMBER_FROM not configured for SMS")
 
     message = _client.messages.create(from_=_phone_from, to=to, body=body)
-    logger.info("SMS sent to %s: sid=%s", to, message.sid)
-    return message.sid
+    sid: str = str(message.sid)
+    logger.info("SMS sent to %s: sid=%s", to, sid)
+    return sid

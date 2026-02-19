@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
 
 from agents import function_tool
 from google.oauth2 import service_account
@@ -9,10 +10,10 @@ from googleapiclient.discovery import build
 
 _SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
-_service = None
+_service: Any = None
 
 
-def _get_service():
+def _get_service() -> Any:
     global _service
     if _service is not None:
         return _service
@@ -56,7 +57,7 @@ def create_calendar_event(
     service = _get_service()
     calendar_id = _get_calendar_id()
 
-    event_body: dict = {
+    event_body: dict[str, Any] = {
         "summary": summary,
         "start": {"dateTime": start_datetime},
         "end": {"dateTime": end_datetime},

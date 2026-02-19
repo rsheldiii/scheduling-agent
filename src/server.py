@@ -72,10 +72,10 @@ class OutgoingCallRequest(BaseModel):
 
 
 class TwilioWebSocketManager:
-    def __init__(self):
-        self._pending_calls: dict[str, dict] = {}
+    def __init__(self) -> None:
+        self._pending_calls: dict[str, dict[str, str | None]] = {}
 
-    def register_pending_call(self, call_id: str, context: dict) -> None:
+    def register_pending_call(self, call_id: str, context: dict[str, str | None]) -> None:
         self._pending_calls[call_id] = context
 
     async def new_session(
@@ -120,12 +120,12 @@ def _get_sms_manager() -> SmsAgentManager:
 
 
 @app.get("/")
-async def root():
+async def root() -> dict[str, str]:
     return {"message": "Twilio Media Stream Server is running!"}
 
 
 @app.get("/prompts")
-async def prompts():
+async def prompts() -> list[dict[str, str]]:
     """List available outgoing-call prompts."""
     return [
         {"key": p.key, "name": p.name, "description": p.description}
@@ -135,7 +135,7 @@ async def prompts():
 
 @app.post("/incoming-call", dependencies=[Depends(_validate_twilio_signature)])
 @app.get("/incoming-call")
-async def incoming_call(request: Request):
+async def incoming_call(request: Request) -> PlainTextResponse:
     """Handle incoming Twilio phone calls."""
     host = request.headers.get("Host")
 
@@ -148,7 +148,7 @@ async def incoming_call(request: Request):
 
 
 @app.post("/outgoing-call")
-async def outgoing_call(request: OutgoingCallRequest):
+async def outgoing_call(request: OutgoingCallRequest) -> dict[str, str | None]:
     """Initiate an outgoing phone call via Twilio."""
     cfg = _get_config()
     required_vars = {
@@ -183,7 +183,7 @@ async def outgoing_call(request: OutgoingCallRequest):
 
 
 @app.post("/incoming-sms", dependencies=[Depends(_validate_twilio_signature)])
-async def incoming_sms(request: Request):
+async def incoming_sms(request: Request) -> PlainTextResponse:
     """Handle incoming Twilio SMS messages."""
     form = await request.form()
     from_number = form.get("From", "")
@@ -198,7 +198,7 @@ async def incoming_sms(request: Request):
     return PlainTextResponse(content=str(response), media_type="text/xml")
 
 
-async def _handle_media_stream(websocket: WebSocket, call_id: str | None = None):
+async def _handle_media_stream(websocket: WebSocket, call_id: str | None = None) -> None:
     """Shared handler for Twilio Media Stream WebSocket connections."""
     handler = await manager.new_session(websocket, call_id=call_id)
     try:
@@ -222,12 +222,12 @@ async def _handle_media_stream(websocket: WebSocket, call_id: str | None = None)
 
 
 @app.websocket("/media-stream")
-async def media_stream_endpoint(websocket: WebSocket):
+async def media_stream_endpoint(websocket: WebSocket) -> None:
     """WebSocket endpoint for incoming calls (no call_id)."""
     await _handle_media_stream(websocket)
 
 
 @app.websocket("/media-stream/{call_id}")
-async def media_stream_with_call_id_endpoint(websocket: WebSocket, call_id: str):
+async def media_stream_with_call_id_endpoint(websocket: WebSocket, call_id: str) -> None:
     """WebSocket endpoint for outgoing calls (with call_id in path)."""
     await _handle_media_stream(websocket, call_id=call_id)

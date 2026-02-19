@@ -87,7 +87,7 @@ class SmsAgentManager:
 
         history.append({"role": "user", "content": body})
 
-        result = await Runner.run(self._agent, input=history)
+        result = await Runner.run(self._agent, input=history)  # type: ignore[arg-type]
         reply = result.final_output or ""
 
         history.append({"role": "assistant", "content": reply})

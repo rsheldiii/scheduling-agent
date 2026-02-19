@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from typing import Any
+
 from agents.realtime import RealtimeAgent
 
 from ..prompts import get_incoming_prompt, get_outgoing_prompt
 from ..tools.common import end_call, get_current_time, get_weather
 from ..tools.user_info import get_user_info, load_user_info, render_template
 
-_SHARED_TOOLS = [get_weather, get_current_time, get_user_info, end_call]
+_SHARED_TOOLS: list[Any] = [get_weather, get_current_time, get_user_info, end_call]
 
 
 def create_incoming_call_agent() -> RealtimeAgent:
