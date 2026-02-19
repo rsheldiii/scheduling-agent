@@ -17,3 +17,6 @@ secrets.env
 
 # Plaintext user info (the .enc version is safe to commit)
 user_info.yaml
+
+# Google service account credentials
+credentials.json

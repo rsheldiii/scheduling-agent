@@ -6,3 +6,5 @@ websockets
 python-dotenv
 pyyaml
 cryptography
+google-api-python-client
+google-auth

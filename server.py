@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from twilio.rest import Client as TwilioClient
 
 from agent_config import create_incoming_call_agent, create_outgoing_call_agent
+from post_call_agent import run_post_call_agent
 from prompts import list_outgoing_prompts
 from twilio_handler import TwilioHandler
 
@@ -122,6 +123,7 @@ async def outgoing_call(request: OutgoingCallRequest):
 
 async def _handle_media_stream(websocket: WebSocket, call_id: str | None = None):
     """Shared handler for Twilio Media Stream WebSocket connections."""
+    handler: TwilioHandler | None = None
     try:
         handler = await manager.new_session(websocket, call_id=call_id)
         await handler.start()
@@ -130,6 +132,14 @@ async def _handle_media_stream(websocket: WebSocket, call_id: str | None = None)
         print("WebSocket disconnected")
     except Exception as e:
         print(f"WebSocket error: {e}")
+    finally:
+        if handler is not None:
+            transcript = handler.get_transcript()
+            if transcript:
+                try:
+                    await run_post_call_agent(transcript)
+                except Exception as e:
+                    print(f"Post-call agent error: {e}")
 
 
 @app.websocket("/media-stream")

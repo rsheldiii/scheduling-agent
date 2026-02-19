@@ -41,6 +41,9 @@ class TwilioHandler:
             str, tuple[str, int, int]
         ] = {}  # mark_id -> (item_id, content_index, byte_count)
 
+        # Transcript capture — latest history snapshot from the realtime session
+        self._history: list[Any] = []
+
     async def start(self) -> None:
         """Start the session."""
         runner = RealtimeRunner(self.agent)
@@ -144,6 +147,10 @@ class TwilioHandler:
             )
         elif event.type == "audio_end":
             print("Audio end")
+        elif event.type == "history_updated":
+            self._history = list(event.history)
+        elif event.type == "history_added":
+            self._history.append(event.item)
         elif event.type == "raw_model_event":
             pass
         else:
@@ -213,6 +220,22 @@ class TwilioHandler:
 
         except Exception as e:
             print(f"Error handling mark event: {e}")
+
+    def get_transcript(self) -> str:
+        """Format captured history into a human-readable transcript."""
+        lines: list[str] = []
+        for item in self._history:
+            if not hasattr(item, "role") or not hasattr(item, "content"):
+                continue
+            role = "User" if item.role == "user" else "Assistant"
+            parts: list[str] = []
+            for entry in item.content:
+                text = getattr(entry, "transcript", None) or getattr(entry, "text", None)
+                if text:
+                    parts.append(text)
+            if parts:
+                lines.append(f"{role}: {' '.join(parts)}")
+        return "\n".join(lines)
 
     async def _flush_audio_buffer(self) -> None:
         """Send buffered audio to OpenAI."""

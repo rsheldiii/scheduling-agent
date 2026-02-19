@@ -20,7 +20,7 @@ We may need to handle sensitive information about the user to properly create re
 
 Security is top-of-mind with AI chatbots. As a first level of safety for users, let's encrypt their sensitive information in a yaml or json or some other config file. The program will then decrypt it while running with a secret supplied through the environment in some form or fashion.
 
-## Google calendar integration (Status: TODO)
+## Google calendar integration (Status: DONE)
 
 This application will be, at it's core, a scheduling application. It will benefit from many tools and integrations, but more than anything else, it will benefit from a google calendar integration. This integration would be used to create calendar events for the reservations / appointments created by the agent.
 
