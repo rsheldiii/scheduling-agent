@@ -1,86 +1,166 @@
-# Realtime Twilio Integration
+# Realtime Scheduling Agent
 
-This example demonstrates how to connect the OpenAI Realtime API to a phone call using Twilio's Media Streams. The server handles incoming phone calls and streams audio between Twilio and the OpenAI Realtime API, enabling real-time voice conversations with an AI agent over the phone.
+An agentic appointment-scheduling application that connects the OpenAI Realtime API to phone calls via Twilio Media Streams. The agent can make and receive calls, create Google Calendar events, and be orchestrated entirely over SMS.
 
 ## Prerequisites
 
--   Python 3.9+
--   OpenAI API key with [Realtime API](https://platform.openai.com/docs/guides/realtime) access
--   [Twilio](https://www.twilio.com/docs/voice) account with a phone number
--   A tunneling service like [ngrok](https://ngrok.com/) to expose your local server
+- Python 3.9+
+- OpenAI API key with [Realtime API](https://platform.openai.com/docs/guides/realtime) access
+- [Twilio](https://www.twilio.com/docs/voice) account with a phone number
+- A tunneling service like [ngrok](https://ngrok.com/) to expose your local server
+- (Optional) Google Cloud service account with Calendar API enabled
 
 ## Setup
 
-1. **Start the server:**
+1. **Install dependencies:**
 
     ```bash
-    uv run server.py
+    pip install -r requirements.txt
     ```
 
-    The server will start on port 8000 by default.
+2. **Configure secrets.** Copy the template and fill in your values:
 
-2. **Expose the server publicly, e.g. via ngrok:**
+    ```
+    OPENAI_API_KEY=sk-...
+    TWILIO_ACCOUNT_SID=AC...
+    TWILIO_AUTH_TOKEN=...
+    PHONE_NUMBER_FROM=+1...
+    DOMAIN=your-ngrok-url.ngrok.io
+    USER_INFO_SECRET=your-encryption-password
+    GOOGLE_CALENDAR_CREDENTIALS=credentials.json   # optional
+    GOOGLE_CALENDAR_ID=primary                      # optional
+    ```
+
+3. **Set up user info.** Edit `user_info.yaml` with your details (including `phone_number` for SMS summaries), then encrypt:
+
+    ```bash
+    python user_info.py encrypt
+    ```
+
+4. **Start the server:**
+
+    ```bash
+    python main.py
+    ```
+
+5. **Expose the server publicly:**
 
     ```bash
     ngrok http 8000
     ```
 
-    Note the public URL (e.g., `https://abc123.ngrok.io`)
+6. **Configure your Twilio phone number:**
+    - Set the **Voice** webhook to: `https://<domain>/incoming-call` (POST)
+    - Set the **Messaging** webhook to: `https://<domain>/incoming-sms` (POST)
 
-3. **Configure your Twilio phone number:**
-    - Log into your Twilio Console
-    - Select your phone number
-    - Set the webhook URL for incoming calls to: `https://your-ngrok-url.ngrok.io/incoming-call`
-    - Set the HTTP method to POST
+## Features
 
-## Usage
+### Voice Calls (Incoming & Outgoing)
 
-1. Call your Twilio phone number
-2. You'll hear: "Hello! You're now connected to an AI assistant. You can start talking!"
-3. Start speaking - the AI will respond in real-time
-4. The assistant has access to tools like weather information and current time
+- **Incoming:** Call the Twilio number and talk to the AI assistant in real time.
+- **Outgoing:** `POST /outgoing-call` with `{"to": "+1...", "prompt": "doctor_appointment"}` to have the agent call on your behalf.
+- Prompts are YAML files in `prompts/outgoing/` — add new scenarios by dropping in a new file.
 
-## How It Works
+### Post-Call Processing
 
-1. **Incoming Call**: When someone calls your Twilio number, Twilio makes a request to `/incoming-call`
-2. **TwiML Response**: The server returns TwiML that:
-    - Plays a greeting message
-    - Connects the call to a WebSocket stream at `/media-stream`
-3. **WebSocket Connection**: Twilio establishes a WebSocket connection for bidirectional audio streaming
-4. **Transport Layer**: The `TwilioRealtimeTransportLayer` class owns the WebSocket message handling:
-    - Takes ownership of the Twilio WebSocket after initial handshake
-    - Runs its own message loop to process all Twilio messages
-    - Handles protocol differences between Twilio and OpenAI
-    - Automatically sets G.711 μ-law audio format for Twilio compatibility
-    - Manages audio chunk tracking for interruption support
-    - Wraps the OpenAI realtime model instead of subclassing it
-5. **Audio Processing**:
-    - Audio from the caller is base64 decoded and sent to OpenAI Realtime API
-    - Audio responses from OpenAI are base64 encoded and sent back to Twilio
-    - Twilio plays the audio to the caller
+When a call ends, the captured transcript is handed to a non-realtime post-call agent that:
 
-## Configuration
+1. Determines whether an appointment was scheduled.
+2. Creates a Google Calendar event if so.
+3. Sends the user an SMS summary of the call.
 
--   **Port**: Set `PORT` environment variable (default: 8000)
--   **OpenAI API Key**: Set `OPENAI_API_KEY` environment variable
--   **Agent Instructions**: Modify the `RealtimeAgent` configuration in `server.py`
--   **Tools**: Add or modify function tools in `server.py`
+### SMS / Texting
 
-## Troubleshooting
+Text the Twilio number to interact with a non-realtime chat agent. The SMS agent can:
 
--   **WebSocket connection issues**: Ensure your ngrok URL is correct and publicly accessible
--   **Audio quality**: Twilio streams audio in mulaw format at 8kHz, which may affect quality
--   **Latency**: Network latency between Twilio, your server, and OpenAI affects response time
--   **Logs**: Check the console output for detailed connection and error logs
+- List available call prompts.
+- Initiate outgoing calls on your behalf.
+- Look up your personal information.
+
+Multi-turn conversation state is maintained per phone number.
+
+### Google Calendar Integration
+
+Requires a Google Cloud service account:
+
+1. Enable the Calendar API in your Google Cloud project.
+2. Create a service account and download the JSON key as `credentials.json`.
+3. Share your Google Calendar with the service account email.
+4. Set `GOOGLE_CALENDAR_CREDENTIALS` and `GOOGLE_CALENDAR_ID` in `secrets.env`.
+
+## API Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/` | Health check |
+| GET | `/prompts` | List available outgoing-call prompts |
+| POST/GET | `/incoming-call` | Twilio voice webhook |
+| POST | `/outgoing-call` | Initiate an outgoing call |
+| POST | `/incoming-sms` | Twilio SMS webhook |
+| WS | `/media-stream` | WebSocket for incoming calls |
+| WS | `/media-stream/{call_id}` | WebSocket for outgoing calls |
+
+## Docker Deployment
+
+Build and run with Docker Compose:
+
+```bash
+docker compose up --build
+```
+
+This mounts `secrets.env`, `user_info.yaml.enc`, and `credentials.json` at runtime so secrets are never baked into the image.
+
+To build the image standalone:
+
+```bash
+docker build -t scheduling-agent .
+docker run --rm -p 8000:8000 \
+  --env-file secrets.env \
+  -v $(pwd)/user_info.yaml.enc:/app/user_info.yaml.enc:ro \
+  -v $(pwd)/credentials.json:/app/credentials.json:ro \
+  -e GOOGLE_CALENDAR_CREDENTIALS=/app/credentials.json \
+  scheduling-agent
+```
+
+### Runpod Deployment
+
+1. Push the image to a container registry (Docker Hub, GHCR, etc.).
+2. Create a Runpod Serverless or Pod endpoint using the image.
+3. Inject secrets via Runpod's **Environment Variables** settings.
+4. Mount `user_info.yaml.enc` and `credentials.json` via Runpod **Network Volumes**.
+5. Expose port 8000 and point your Twilio webhooks at the Runpod URL.
+
+> **Security:** Secrets are never baked into the image. The `.dockerignore` excludes `secrets.env`, `credentials.json`, and `user_info.yaml*`. All sensitive data is injected at runtime.
 
 ## Architecture
 
 ```
-Phone Call → Twilio → WebSocket → TwilioRealtimeTransportLayer → OpenAI Realtime API
-                                              ↓
-                                      RealtimeAgent with Tools
-                                              ↓
-                           Audio Response → Twilio → Phone Call
+                      ┌──────────────┐
+  Phone Call ──────►  │    Twilio     │
+                      └──────┬───────┘
+                   Voice ▼        ▲ SMS
+              ┌──────────────┐  ┌──────────────┐
+              │  TwilioHandler│  │  SmsAgent    │
+              │  (Realtime)   │  │  (Non-RT)    │
+              └──────┬───────┘  └──────┬───────┘
+                     ▼                 │
+              ┌──────────────┐         │
+              │ OpenAI RT API│         │
+              └──────┬───────┘         │
+                     ▼                 ▼
+              ┌──────────────┐  ┌──────────────┐
+              │ Post-Call    │  │ Orchestrate  │
+              │ Agent (Non-RT)│  │ Outgoing Call│
+              └──────┬───────┘  └──────────────┘
+                     ▼
+              ┌──────────────┐
+              │Google Calendar│
+              └──────────────┘
 ```
 
-The `TwilioRealtimeTransportLayer` acts as a bridge between Twilio's Media Streams and OpenAI's Realtime API, handling the protocol differences and audio format conversions. It wraps the OpenAI realtime model to provide a clean interface for Twilio integration.
+## Configuration
+
+- **Port**: `PORT` env var (default: 8000)
+- **Prompts**: YAML files in `prompts/{incoming,outgoing,sms}/`
+- **User Info**: Encrypted in `user_info.yaml.enc`, decrypted at runtime with `USER_INFO_SECRET`
+- **Tools**: Defined in `tools.py` and `google_calendar.py`

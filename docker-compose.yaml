@@ -1,0 +1,12 @@
+services:
+  scheduling-agent:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - secrets.env
+    volumes:
+      - ./user_info.yaml.enc:/app/user_info.yaml.enc:ro
+      - ./credentials.json:/app/credentials.json:ro
+    environment:
+      - GOOGLE_CALENDAR_CREDENTIALS=/app/credentials.json

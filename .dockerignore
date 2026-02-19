@@ -1,0 +1,28 @@
+# Secrets — never bake into the image
+secrets.env
+credentials.json
+
+# User info — mount at runtime
+user_info.yaml
+user_info.yaml.enc
+
+# Git
+.git
+.gitignore
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+
+# IDE / editor
+.vscode/
+.cursor/
+*.swp
+
+# Misc
+README.md
+TODO.md

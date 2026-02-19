@@ -34,7 +34,7 @@ When the user texts the phone number, they talk to a non-realtime chat agent. Th
 
 Additionally, when a call is finished, it would be nice if the user was also updated with a summary of how the call went, sent via text.
 
-## Runpod / Docker Container runtime (Status: TODO)
+## Runpod / Docker Container runtime (Status: DONE)
 
 It would be nice to allow people to deploy this code in an isolated environment at the push of a button. to that end, it'd be great if we could have Docker container / runpod deployment capabilities.
 
