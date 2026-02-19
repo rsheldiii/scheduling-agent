@@ -2,6 +2,7 @@ import logging
 import os
 import re
 import uuid
+from functools import lru_cache
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import PlainTextResponse
@@ -18,11 +19,21 @@ from .tools.user_info import load_user_info
 
 logger = logging.getLogger(__name__)
 
-TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
-TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
-PHONE_NUMBER_FROM = os.getenv("PHONE_NUMBER_FROM")
-raw_domain = os.getenv("DOMAIN", "")
-DOMAIN = re.sub(r"(^\w+:|^)\/\/|\/+$", "", raw_domain)
+
+@lru_cache
+def _get_config() -> dict[str, str | None]:
+    """Read Twilio / app config from the environment lazily.
+
+    Cached after the first call so env vars are only read once, but not at
+    import time -- this keeps the module testable and order-independent.
+    """
+    raw_domain = os.getenv("DOMAIN", "")
+    return {
+        "twilio_account_sid": os.getenv("TWILIO_ACCOUNT_SID"),
+        "twilio_auth_token": os.getenv("TWILIO_AUTH_TOKEN"),
+        "phone_number_from": os.getenv("PHONE_NUMBER_FROM"),
+        "domain": re.sub(r"(^\w+:|^)\/\/|\/+$", "", raw_domain),
+    }
 
 
 class OutgoingCallRequest(BaseModel):
@@ -67,12 +78,13 @@ def _get_sms_manager() -> SmsAgentManager:
     """Lazily initialize the SMS agent manager to avoid import-time side effects."""
     global sms_manager
     if sms_manager is None:
-        twilio_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        cfg = _get_config()
+        twilio_client = TwilioClient(cfg["twilio_account_sid"], cfg["twilio_auth_token"])
         sms_manager = SmsAgentManager(
             ws_manager=manager,
             twilio_client=twilio_client,
-            phone_from=PHONE_NUMBER_FROM or "",
-            domain=DOMAIN,
+            phone_from=cfg["phone_number_from"] or "",
+            domain=cfg["domain"] or "",
         )
     return sms_manager
 
@@ -110,11 +122,12 @@ async def incoming_call(request: Request):
 @app.post("/outgoing-call")
 async def outgoing_call(request: OutgoingCallRequest):
     """Initiate an outgoing phone call via Twilio."""
+    cfg = _get_config()
     required_vars = {
-        "TWILIO_ACCOUNT_SID": TWILIO_ACCOUNT_SID,
-        "TWILIO_AUTH_TOKEN": TWILIO_AUTH_TOKEN,
-        "PHONE_NUMBER_FROM": PHONE_NUMBER_FROM,
-        "DOMAIN": DOMAIN,
+        "TWILIO_ACCOUNT_SID": cfg["twilio_account_sid"],
+        "TWILIO_AUTH_TOKEN": cfg["twilio_auth_token"],
+        "PHONE_NUMBER_FROM": cfg["phone_number_from"],
+        "DOMAIN": cfg["domain"],
     }
     missing = [name for name, val in required_vars.items() if not val]
     if missing:
@@ -123,17 +136,17 @@ async def outgoing_call(request: OutgoingCallRequest):
     call_id = str(uuid.uuid4())
     manager.register_pending_call(call_id, {"to": request.to, "prompt": request.prompt})
 
-    twilio_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+    twilio_client = TwilioClient(cfg["twilio_account_sid"], cfg["twilio_auth_token"])
 
     outbound_twiml = (
         f'<?xml version="1.0" encoding="UTF-8"?>'
         f"<Response><Connect>"
-        f'<Stream url="wss://{DOMAIN}/media-stream/{call_id}" />'
+        f'<Stream url="wss://{cfg["domain"]}/media-stream/{call_id}" />'
         f"</Connect></Response>"
     )
 
     call = twilio_client.calls.create(
-        from_=PHONE_NUMBER_FROM,
+        from_=cfg["phone_number_from"],
         to=request.to,
         twiml=outbound_twiml,
     )
