@@ -4,9 +4,10 @@ import re
 import uuid
 from functools import lru_cache
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
+from twilio.request_validator import RequestValidator
 from twilio.rest import Client as TwilioClient
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.twiml.voice_response import Connect, VoiceResponse
@@ -36,6 +37,33 @@ def _get_config() -> dict[str, str | None]:
         "phone_number_from": os.getenv("PHONE_NUMBER_FROM"),
         "domain": re.sub(r"(^\w+:|^)\/\/|\/+$", "", raw_domain),
     }
+
+
+async def _validate_twilio_signature(request: Request) -> None:
+    """FastAPI dependency that validates the X-Twilio-Signature header.
+
+    Skipped when TWILIO_SIGNATURE_VALIDATION is set to "false" (useful for
+    local development behind ngrok).
+    """
+    if os.getenv("TWILIO_SIGNATURE_VALIDATION", "true").lower() == "false":
+        return
+
+    cfg = _get_config()
+    auth_token = cfg["twilio_auth_token"]
+    if not auth_token:
+        raise HTTPException(status_code=500, detail="TWILIO_AUTH_TOKEN not configured")
+
+    validator = RequestValidator(auth_token)
+    signature = request.headers.get("X-Twilio-Signature", "")
+
+    # Twilio sends POST form data; we need the form params for validation
+    form = await request.form()
+    params = {k: str(v) for k, v in form.items()}
+    url = str(request.url)
+
+    if not validator.validate(url, params, signature):
+        logger.warning("Invalid Twilio signature for %s", url)
+        raise HTTPException(status_code=403, detail="Invalid Twilio signature")
 
 
 class OutgoingCallRequest(BaseModel):
@@ -105,7 +133,7 @@ async def prompts():
     ]
 
 
-@app.post("/incoming-call")
+@app.post("/incoming-call", dependencies=[Depends(_validate_twilio_signature)])
 @app.get("/incoming-call")
 async def incoming_call(request: Request):
     """Handle incoming Twilio phone calls."""
@@ -154,7 +182,7 @@ async def outgoing_call(request: OutgoingCallRequest):
     return {"call_id": call_id, "call_sid": call.sid, "status": call.status}
 
 
-@app.post("/incoming-sms")
+@app.post("/incoming-sms", dependencies=[Depends(_validate_twilio_signature)])
 async def incoming_sms(request: Request):
     """Handle incoming Twilio SMS messages."""
     form = await request.form()
