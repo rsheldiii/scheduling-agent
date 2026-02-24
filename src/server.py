@@ -12,10 +12,9 @@ from twilio.rest import Client as TwilioClient
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.twiml.voice_response import Connect, VoiceResponse
 
-from .agent_factory.realtime import create_incoming_call_agent, create_outgoing_call_agent
-from .agent_factory.post_call import run_post_call_agent
-from .agent_factory.sms import SmsAgentManager
-from .prompts import list_outgoing_prompts
+from .agent_factory.realtime.agent import create_incoming_call_agent, create_outgoing_call_agent, list_outgoing_prompts
+from .agent_factory.post_call.agent import run_post_call_agent
+from .agent_factory.sms.agent import SmsAgentManager
 from .sms import send_sms
 from .twilio_handler import TwilioHandler
 from .tools.user_info import load_user_info
@@ -140,7 +139,15 @@ async def incoming_call(request: Request) -> PlainTextResponse:
     host = request.headers.get("Host")
 
     response = VoiceResponse()
-    response.say("Hello! You're now connected to an AI assistant. You can start talking!")
+    response.say(
+        "Please wait while we connect your call to the A. I. voice assistant.",
+        voice="Google.en-US-Chirp3-HD-Aoede",
+    )
+    response.pause(length=1)
+    response.say(
+        "O.K. you can start talking!",
+        voice="Google.en-US-Chirp3-HD-Aoede",
+    )
     connect = Connect()
     connect.stream(url=f"wss://{host}/media-stream")
     response.append(connect)
@@ -231,3 +238,9 @@ async def media_stream_endpoint(websocket: WebSocket) -> None:
 async def media_stream_with_call_id_endpoint(websocket: WebSocket, call_id: str) -> None:
     """WebSocket endpoint for outgoing calls (with call_id in path)."""
     await _handle_media_stream(websocket, call_id=call_id)
+
+
+# Chainlit chat UI -- must be mounted after all other routes.
+from chainlit.utils import mount_chainlit  # noqa: E402
+
+mount_chainlit(app=app, target="src/chat_app.py", path="/chat")

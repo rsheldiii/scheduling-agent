@@ -18,7 +18,7 @@ def build_sms_tools(
     Returns a list of function_tool-decorated callables ready to be passed
     to an Agent's tools parameter.
     """
-    from ..prompts import list_outgoing_prompts
+    from ..agent_factory.realtime.agent import list_outgoing_prompts
 
     @function_tool
     def make_outgoing_call(to: str, prompt: str = "doctor_appointment") -> str:

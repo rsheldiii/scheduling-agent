@@ -5,7 +5,6 @@ import base64
 import json
 import logging
 import os
-import time
 from typing import Any
 
 from fastapi import WebSocket
@@ -22,10 +21,6 @@ logger = logging.getLogger(__name__)
 
 
 class TwilioHandler:
-    CHUNK_LENGTH_S = 0.05
-    SAMPLE_RATE = 8000
-    BUFFER_SIZE_BYTES = int(SAMPLE_RATE * CHUNK_LENGTH_S)
-
     def __init__(self, twilio_websocket: WebSocket, agent: RealtimeAgent):
         self.agent = agent
         self.twilio_websocket = twilio_websocket
@@ -34,11 +29,8 @@ class TwilioHandler:
 
         self._realtime_session_task: asyncio.Task[None] | None = None
         self._message_loop_task: asyncio.Task[None] | None = None
-        self._buffer_flush_task: asyncio.Task[None] | None = None
 
         self._stream_sid: str | None = None
-        self._audio_buffer: bytearray = bytearray()
-        self._last_buffer_send_time = time.time()
 
         self._mark_counter = 0
         self._mark_data: dict[
@@ -112,12 +104,15 @@ class TwilioHandler:
         if not api_key:
             raise ValueError("OPENAI_API_KEY environment variable is required")
 
+        voice = os.getenv("REALTIME_VOICE", "ash")
+
         self.session = await runner.run(
             model_config={
                 "api_key": api_key,
                 "initial_model_settings": {
-                    "input_audio_format": "g711_ulaw",
-                    "output_audio_format": "g711_ulaw",
+                    "input_audio_format": "audio/pcmu",
+                    "output_audio_format": "audio/pcmu",
+                    "voice": voice,
                     "turn_detection": {
                         "type": "semantic_vad",
                         "interrupt_response": True,
@@ -143,10 +138,6 @@ class TwilioHandler:
             task = asyncio.create_task(self._twilio_message_loop())
             self._message_loop_task = task
             tasks_created.append(task)
-
-            task = asyncio.create_task(self._buffer_flush_loop())
-            self._buffer_flush_task = task
-            tasks_created.append(task)
         except Exception:
             for t in tasks_created:
                 t.cancel()
@@ -157,7 +148,6 @@ class TwilioHandler:
         tasks = [
             self._realtime_session_task,
             self._message_loop_task,
-            self._buffer_flush_task,
         ]
         live = [t for t in tasks if t is not None and not t.done()]
         for t in live:
@@ -193,22 +183,6 @@ class TwilioHandler:
             pass
         except Exception as e:
             logger.info("Twilio message loop ended: %s", e)
-
-    async def _buffer_flush_loop(self) -> None:
-        """Periodically flush audio buffer to prevent stale data."""
-        try:
-            while True:
-                await asyncio.sleep(self.CHUNK_LENGTH_S)
-                current_time = time.time()
-                if (
-                    self._audio_buffer
-                    and current_time - self._last_buffer_send_time > self.CHUNK_LENGTH_S * 2
-                ):
-                    await self._flush_audio_buffer()
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            logger.error("Error in buffer flush loop: %s", e)
 
     # ------------------------------------------------------------------
     # Event handlers
@@ -257,10 +231,24 @@ class TwilioHandler:
             self._history = list(event.history)
         elif event.type == "history_added":
             self._history.append(event.item)
+            self._log_transcript_item(event.item)
         elif event.type == "raw_model_event":
             pass
         else:
             pass
+
+    def _log_transcript_item(self, item: Any) -> None:
+        """Log a single transcript item as it arrives."""
+        if not hasattr(item, "role") or not hasattr(item, "content"):
+            return
+        role = "User" if item.role == "user" else "Assistant"
+        parts: list[str] = []
+        for entry in item.content:
+            text = getattr(entry, "transcript", None) or getattr(entry, "text", None)
+            if text:
+                parts.append(text)
+        if parts:
+            logger.info("[Transcript] %s: %s", role, " ".join(parts))
 
     async def _handle_twilio_message(self, message: dict[str, Any]) -> None:
         """Handle incoming messages from Twilio Media Stream."""
@@ -283,20 +271,16 @@ class TwilioHandler:
             logger.error("Error handling Twilio message: %s", e)
 
     async def _handle_media_event(self, message: dict[str, Any]) -> None:
-        """Handle audio data from Twilio - buffer it before sending to OpenAI."""
+        """Forward audio from Twilio directly to OpenAI with no buffering."""
+        if not self.session:
+            return
         media = message.get("media", {})
         payload = media.get("payload", "")
-
         if payload:
             try:
-                ulaw_bytes = base64.b64decode(payload)
-                self._audio_buffer.extend(ulaw_bytes)
-
-                if len(self._audio_buffer) >= self.BUFFER_SIZE_BYTES:
-                    await self._flush_audio_buffer()
-
+                await self.session.send_audio(base64.b64decode(payload))
             except Exception as e:
-                logger.error("Error processing audio from Twilio: %s", e)
+                logger.error("Error forwarding audio to OpenAI: %s", e)
 
     async def _handle_mark_event(self, message: dict[str, Any]) -> None:
         """Handle mark events from Twilio to update playback tracker."""
@@ -316,16 +300,3 @@ class TwilioHandler:
 
         except Exception as e:
             logger.error("Error handling mark event: %s", e)
-
-    async def _flush_audio_buffer(self) -> None:
-        """Send buffered audio to OpenAI."""
-        if not self._audio_buffer or not self.session:
-            return
-
-        try:
-            buffer_data = bytes(self._audio_buffer)
-            await self.session.send_audio(buffer_data)
-            self._audio_buffer.clear()
-            self._last_buffer_send_time = time.time()
-        except Exception as e:
-            logger.error("Error sending buffered audio to OpenAI: %s", e)

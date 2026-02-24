@@ -20,3 +20,6 @@ user_info.yaml
 
 # Google service account credentials
 credentials.json
+
+# Chainlit auto-generated config and translations
+.chainlit/

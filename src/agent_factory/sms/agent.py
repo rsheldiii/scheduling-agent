@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import logging
 import time
+from pathlib import Path
 from typing import Any
 
 from agents import Agent, Runner
 
-from ..prompts import get_sms_prompt
-from ..tools.sms import build_sms_tools
-from ..tools.user_info import get_user_info, load_user_info, render_template
+from ...prompts import PromptLoader
+from ...tools.sms import build_sms_tools
+from ...tools.user_info import get_user_info, load_user_info, render_template
 
 logger = logging.getLogger(__name__)
+
+_prompts = PromptLoader(Path(__file__).parent / "prompts")
 
 _DEFAULT_TTL_SECONDS = 3600  # 1 hour
 _MAX_TURNS = 50
@@ -53,7 +56,7 @@ class SmsAgentManager:
         )
 
         user_info = load_user_info()
-        prompt = get_sms_prompt()
+        prompt = _prompts.get("default")
         instructions = render_template(prompt.instructions, user_info)
 
         return Agent(

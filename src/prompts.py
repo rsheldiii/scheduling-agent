@@ -5,9 +5,6 @@ from pathlib import Path
 
 import yaml
 
-_PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
-_DEFAULT_OUTGOING_KEY = "doctor_appointment"
-
 
 @dataclass(frozen=True)
 class Prompt:
@@ -17,74 +14,62 @@ class Prompt:
     instructions: str
 
 
-def _load_prompt(path: Path) -> Prompt:
-    """Load a single prompt from a YAML file.  The key is the filename stem."""
-    with open(path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f)
-    return Prompt(
-        key=path.stem,
-        name=data["name"],
-        description=data["description"],
-        instructions=data["instructions"].strip(),
-    )
+class PromptLoader:
+    """Lazy-loading prompt store backed by a local ``prompts/`` directory.
 
+    Each agent instantiates its own loader pointed at the ``prompts/``
+    directory co-located with its module::
 
-def _load_prompts_from(directory: Path) -> dict[str, Prompt]:
-    prompts: dict[str, Prompt] = {}
-    if not directory.is_dir():
-        return prompts
-    for path in sorted(directory.glob("*.yaml")):
-        prompt = _load_prompt(path)
-        prompts[prompt.key] = prompt
-    return prompts
+        _prompts = PromptLoader(Path(__file__).parent / "prompts")
 
+    Prompts can live directly in that directory or be organized into
+    subdirectory *categories*::
 
-_incoming_prompts: dict[str, Prompt] | None = None
-_outgoing_prompts: dict[str, Prompt] | None = None
-_sms_prompts: dict[str, Prompt] | None = None
+        p = _prompts.get("default")                        # prompts/default.yaml
+        p = _prompts.get("default", category="incoming")   # prompts/incoming/default.yaml
+        all_outgoing = _prompts.list(category="outgoing")
+    """
 
+    def __init__(self, prompts_dir: Path | str) -> None:
+        self._dir = Path(prompts_dir)
+        self._cache: dict[str, dict[str, Prompt]] = {}
 
-def _get_incoming_prompts() -> dict[str, Prompt]:
-    global _incoming_prompts
-    if _incoming_prompts is None:
-        _incoming_prompts = _load_prompts_from(_PROMPTS_DIR / "incoming")
-    return _incoming_prompts
+    @staticmethod
+    def _parse(path: Path) -> Prompt:
+        with open(path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        return Prompt(
+            key=path.stem,
+            name=data["name"],
+            description=data["description"],
+            instructions=data["instructions"].strip(),
+        )
 
+    def _load(self, category: str) -> dict[str, Prompt]:
+        if category not in self._cache:
+            directory = self._dir / category if category else self._dir
+            prompts: dict[str, Prompt] = {}
+            if directory.is_dir():
+                for path in sorted(directory.glob("*.yaml")):
+                    prompt = self._parse(path)
+                    prompts[prompt.key] = prompt
+            self._cache[category] = prompts
+        return self._cache[category]
 
-def _get_outgoing_prompts() -> dict[str, Prompt]:
-    global _outgoing_prompts
-    if _outgoing_prompts is None:
-        _outgoing_prompts = _load_prompts_from(_PROMPTS_DIR / "outgoing")
-    return _outgoing_prompts
+    def get(self, key: str = "default", *, category: str = "") -> Prompt:
+        """Return a single prompt by *key* (filename stem).
 
+        If *category* is given, look inside that subdirectory.
+        """
+        prompts = self._load(category)
+        if key not in prompts:
+            available = ", ".join(sorted(prompts.keys()))
+            raise ValueError(
+                f"Unknown prompt '{key}' (category='{category}'). "
+                f"Available: {available}"
+            )
+        return prompts[key]
 
-def _get_sms_prompts() -> dict[str, Prompt]:
-    global _sms_prompts
-    if _sms_prompts is None:
-        _sms_prompts = _load_prompts_from(_PROMPTS_DIR / "sms")
-    return _sms_prompts
-
-
-def get_incoming_prompt() -> Prompt:
-    """Return the default incoming-call prompt."""
-    return _get_incoming_prompts()["default"]
-
-
-def get_outgoing_prompt(key: str | None = None) -> Prompt:
-    """Return an outgoing-call prompt by key, defaulting to doctor_appointment."""
-    key = key or _DEFAULT_OUTGOING_KEY
-    prompts = _get_outgoing_prompts()
-    if key not in prompts:
-        available = ", ".join(sorted(prompts.keys()))
-        raise ValueError(f"Unknown outgoing prompt '{key}'. Available: {available}")
-    return prompts[key]
-
-
-def get_sms_prompt() -> Prompt:
-    """Return the default SMS agent prompt."""
-    return _get_sms_prompts()["default"]
-
-
-def list_outgoing_prompts() -> list[Prompt]:
-    """Return all available outgoing-call prompts."""
-    return list(_get_outgoing_prompts().values())
+    def list(self, category: str = "") -> list[Prompt]:
+        """Return all prompts, optionally filtered to a *category* subdirectory."""
+        return list(self._load(category).values())

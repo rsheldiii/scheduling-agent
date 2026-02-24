@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from agents import Agent, Runner
 
-from ..prompts import get_post_call_prompt
-from ..tools.google_calendar import create_calendar_event
+from ...prompts import PromptLoader
+from ...tools.google_calendar import create_calendar_event
 
 logger = logging.getLogger(__name__)
 
+_prompts = PromptLoader(Path(__file__).parent / "prompts")
+
 
 def _build_agent() -> Agent:
-    prompt = get_post_call_prompt()
+    prompt = _prompts.get("default")
     return Agent(
         name=prompt.name,
         instructions=prompt.instructions,
