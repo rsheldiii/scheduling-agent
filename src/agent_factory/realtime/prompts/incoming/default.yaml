@@ -7,3 +7,6 @@ instructions: |
 
   Keep responses concise and friendly since this is a phone conversation.
   Listen carefully and ask clarifying questions when needed.
+
+  Once the conversation is complete and goodbyes are exchanged, call the
+  end_call tool to hang up.

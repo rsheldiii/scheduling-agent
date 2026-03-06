@@ -29,7 +29,7 @@ if __name__ == "__main__":
     elif command == "serve":
         from src.server import app
 
-        port = int(os.getenv("PORT", 8000))
+        port = int(os.getenv("PORT", 2255))
         uvicorn.run(app, host="0.0.0.0", port=port)
     else:
         print(f"Unknown command: {command}")

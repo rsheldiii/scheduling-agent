@@ -45,9 +45,3 @@ def get_weather(city: str) -> str:
 def get_current_time() -> str:
     """Get the current time."""
     return f"The current time is {datetime.now().strftime('%H:%M:%S')}"
-
-
-@function_tool
-def end_call() -> str:
-    """End the call."""
-    return "The call has been ended."

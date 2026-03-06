@@ -9,6 +9,7 @@ from typing import Any
 
 from fastapi import WebSocket
 
+from agents import function_tool
 from agents.realtime import (
     RealtimeAgent,
     RealtimePlaybackTracker,
@@ -21,14 +22,18 @@ logger = logging.getLogger(__name__)
 
 
 class TwilioHandler:
-    def __init__(self, twilio_websocket: WebSocket, agent: RealtimeAgent):
+    def __init__(self, twilio_websocket: WebSocket, agent: RealtimeAgent, voice: str | None = None):
         self.agent = agent
         self.twilio_websocket = twilio_websocket
+        self._voice = voice
         self.session: RealtimeSession | None = None
         self.playback_tracker = RealtimePlaybackTracker()
 
         self._realtime_session_task: asyncio.Task[None] | None = None
         self._message_loop_task: asyncio.Task[None] | None = None
+        self._end_call_task: asyncio.Task[None] | None = None
+        self._end_call_event = asyncio.Event()
+        self._audio_done_after_end = asyncio.Event()
 
         self._stream_sid: str | None = None
 
@@ -98,13 +103,26 @@ class TwilioHandler:
     # ------------------------------------------------------------------
 
     async def _setup_session(self) -> None:
-        """Create the realtime session and spawn the three background tasks."""
-        runner = RealtimeRunner(self.agent)
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise ValueError("OPENAI_API_KEY environment variable is required")
+        """Create the realtime session and spawn background tasks."""
+        from .secrets import get_secret
 
-        voice = os.getenv("REALTIME_VOICE", "ash")
+        api_key = get_secret("openai_api_key", "OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY not configured")
+
+        end_call_event = self._end_call_event
+
+        @function_tool
+        def end_call() -> str:
+            """End the phone call. Call this when the conversation is complete and goodbyes have been exchanged."""
+            end_call_event.set()
+            return "Ending the call now."
+
+        agent = self.agent.clone(tools=[*self.agent.tools, end_call])
+        runner = RealtimeRunner(agent)
+
+        from .voices import DEFAULT_VOICE
+        voice = self._voice or os.getenv("REALTIME_VOICE") or DEFAULT_VOICE
 
         self.session = await runner.run(
             model_config={
@@ -138,6 +156,10 @@ class TwilioHandler:
             task = asyncio.create_task(self._twilio_message_loop())
             self._message_loop_task = task
             tasks_created.append(task)
+
+            task = asyncio.create_task(self._end_call_watcher())
+            self._end_call_task = task
+            tasks_created.append(task)
         except Exception:
             for t in tasks_created:
                 t.cancel()
@@ -148,6 +170,7 @@ class TwilioHandler:
         tasks = [
             self._realtime_session_task,
             self._message_loop_task,
+            self._end_call_task,
         ]
         live = [t for t in tasks if t is not None and not t.done()]
         for t in live:
@@ -182,7 +205,32 @@ class TwilioHandler:
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            logger.info("Twilio message loop ended: %s", e)
+            if self._end_call_event.is_set():
+                logger.debug("Twilio message loop ended (expected after end_call)")
+            else:
+                logger.info("Twilio message loop ended: %s", e)
+
+    async def _end_call_watcher(self) -> None:
+        """Wait for the end_call tool to fire, let the model finish speaking, then disconnect.
+
+        After the tool fires we wait for the next ``audio_end`` event (the
+        model finishing its final response) before closing.  A hard timeout
+        prevents hanging forever if the event never arrives.
+        """
+        try:
+            await self._end_call_event.wait()
+            logger.info("end_call triggered, waiting for final audio to finish")
+            try:
+                await asyncio.wait_for(self._audio_done_after_end.wait(), timeout=10.0)
+            except asyncio.TimeoutError:
+                logger.warning("Timed out waiting for final audio after end_call")
+            await asyncio.sleep(0.5)
+            logger.info("Closing Twilio WebSocket")
+            await self.twilio_websocket.close()
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.debug("Error in end_call watcher: %s", e)
 
     # ------------------------------------------------------------------
     # Event handlers
@@ -227,6 +275,8 @@ class TwilioHandler:
             )
         elif event.type == "audio_end":
             logger.debug("Audio end")
+            if self._end_call_event.is_set():
+                self._audio_done_after_end.set()
         elif event.type == "history_updated":
             self._history = list(event.history)
         elif event.type == "history_added":

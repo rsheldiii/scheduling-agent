@@ -14,6 +14,8 @@ from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives.hashes import SHA256
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
+from ..secrets import get_secret
+
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _PLAINTEXT_PATH = _PROJECT_ROOT / "user_info.yaml"
 _ENCRYPTED_PATH = _PROJECT_ROOT / "user_info.yaml.enc"
@@ -40,7 +42,7 @@ def encrypt_file(
     encrypted_path: Path = _ENCRYPTED_PATH,
     password: str | None = None,
 ) -> None:
-    password = password or os.getenv(_ENV_VAR)
+    password = password or get_secret("user_info_secret", _ENV_VAR)
     if not password:
         raise ValueError(
             f"No password provided and {_ENV_VAR} environment variable is not set"
@@ -63,7 +65,7 @@ def decrypt_and_load(
     encrypted_path: Path = _ENCRYPTED_PATH,
     password: str | None = None,
 ) -> dict[str, str]:
-    password = password or os.getenv(_ENV_VAR)
+    password = password or get_secret("user_info_secret", _ENV_VAR)
     if not password:
         raise ValueError(
             f"No password provided and {_ENV_VAR} environment variable is not set"

@@ -1,12 +1,14 @@
 import logging
 import os
 import re
+import secrets
 import uuid
 from functools import lru_cache
 
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel, field_validator
 from twilio.request_validator import RequestValidator
 from twilio.rest import Client as TwilioClient
 from twilio.twiml.messaging_response import MessagingResponse
@@ -15,11 +17,33 @@ from twilio.twiml.voice_response import Connect, VoiceResponse
 from .agent_factory.realtime.agent import create_incoming_call_agent, create_outgoing_call_agent, list_outgoing_prompts
 from .agent_factory.post_call.agent import run_post_call_agent
 from .agent_factory.sms.agent import SmsAgentManager
+from .secrets import get_secret
 from .sms import send_sms
 from .twilio_handler import TwilioHandler
 from .tools.user_info import load_user_info
 
 logger = logging.getLogger(__name__)
+
+_bearer_scheme = HTTPBearer()
+
+
+@lru_cache
+def _get_bearer_token() -> str:
+    """Return the API bearer token, generating one if not configured."""
+    token = get_secret("api_bearer_token", "API_BEARER_TOKEN")
+    if token:
+        return token
+    token = secrets.token_urlsafe(32)
+    logger.warning("API_BEARER_TOKEN not set — generated token: %s", token)
+    return token
+
+
+async def _validate_bearer_token(
+    credentials: HTTPAuthorizationCredentials = Depends(_bearer_scheme),
+) -> None:
+    """FastAPI dependency that validates the Authorization: Bearer header."""
+    if credentials.credentials != _get_bearer_token():
+        raise HTTPException(status_code=401, detail="Invalid bearer token")
 
 
 @lru_cache
@@ -31,9 +55,9 @@ def _get_config() -> dict[str, str | None]:
     """
     raw_domain = os.getenv("DOMAIN", "")
     return {
-        "twilio_account_sid": os.getenv("TWILIO_ACCOUNT_SID"),
-        "twilio_auth_token": os.getenv("TWILIO_AUTH_TOKEN"),
-        "phone_number_from": os.getenv("PHONE_NUMBER_FROM"),
+        "twilio_account_sid": get_secret("twilio_account_sid", "TWILIO_ACCOUNT_SID"),
+        "twilio_auth_token": get_secret("twilio_auth_token", "TWILIO_AUTH_TOKEN"),
+        "phone_number_from": get_secret("twilio_phone_from", "PHONE_NUMBER_FROM"),
         "domain": re.sub(r"(^\w+:|^)\/\/|\/+$", "", raw_domain),
     }
 
@@ -68,6 +92,17 @@ async def _validate_twilio_signature(request: Request) -> None:
 class OutgoingCallRequest(BaseModel):
     to: str
     prompt: str | None = None
+    additional_context: str | None = None
+    voice: str | None = None
+
+    @field_validator("to")
+    @classmethod
+    def validate_phone_number(cls, v: str) -> str:
+        if not re.fullmatch(r"\+[1-9]\d{1,14}", v):
+            raise ValueError(
+                "Phone number must be in E.164 format (e.g. +14155551234)"
+            )
+        return v
 
 
 class TwilioWebSocketManager:
@@ -88,13 +123,17 @@ class TwilioWebSocketManager:
         if call_id and call_id in self._pending_calls:
             context = self._pending_calls.pop(call_id)
             prompt_key = context.get("prompt")
+            additional_context = context.get("additional_context")
+            request_voice = context.get("voice")
             logger.info("Creating outgoing call handler (call_id=%s, to=%s, prompt=%s)", call_id, context.get("to"), prompt_key)
-            agent = create_outgoing_call_agent(prompt_key=prompt_key)
+            result = create_outgoing_call_agent(prompt_key=prompt_key, additional_context=additional_context)
+            voice = request_voice or result.voice
         else:
             logger.info("Creating incoming call handler")
-            agent = create_incoming_call_agent()
+            result = create_incoming_call_agent()
+            voice = result.voice
 
-        return TwilioHandler(websocket, agent)
+        return TwilioHandler(websocket, result.agent, voice=voice)
 
 
 manager = TwilioWebSocketManager()
@@ -118,16 +157,16 @@ def _get_sms_manager() -> SmsAgentManager:
     return sms_manager
 
 
-@app.get("/")
-async def root() -> dict[str, str]:
-    return {"message": "Twilio Media Stream Server is running!"}
+@app.get("/health")
+async def health() -> dict[str, str]:
+    return {"status": "ok"}
 
 
-@app.get("/prompts")
-async def prompts() -> list[dict[str, str]]:
+@app.get("/prompts", dependencies=[Depends(_validate_bearer_token)])
+async def prompts() -> list[dict]:
     """List available outgoing-call prompts."""
     return [
-        {"key": p.key, "name": p.name, "description": p.description}
+        {"key": p.key, "name": p.name, "description": p.description, "required_context": p.required_context}
         for p in list_outgoing_prompts()
     ]
 
@@ -154,7 +193,7 @@ async def incoming_call(request: Request) -> PlainTextResponse:
     return PlainTextResponse(content=str(response), media_type="text/xml")
 
 
-@app.post("/outgoing-call")
+@app.post("/outgoing-call", dependencies=[Depends(_validate_bearer_token)])
 async def outgoing_call(request: OutgoingCallRequest) -> dict[str, str | None]:
     """Initiate an outgoing phone call via Twilio."""
     cfg = _get_config()
@@ -166,10 +205,20 @@ async def outgoing_call(request: OutgoingCallRequest) -> dict[str, str | None]:
     }
     missing = [name for name, val in required_vars.items() if not val]
     if missing:
-        return {"error": f"Missing required environment variables: {', '.join(missing)}"}
+        raise HTTPException(
+            status_code=500,
+            detail=f"Missing required environment variables: {', '.join(missing)}",
+        )
 
     call_id = str(uuid.uuid4())
-    manager.register_pending_call(call_id, {"to": request.to, "prompt": request.prompt})
+    manager.register_pending_call(
+        call_id, {
+            "to": request.to,
+            "prompt": request.prompt,
+            "additional_context": request.additional_context,
+            "voice": request.voice,
+        }
+    )
 
     twilio_client = TwilioClient(cfg["twilio_account_sid"], cfg["twilio_auth_token"])
 
@@ -243,4 +292,4 @@ async def media_stream_with_call_id_endpoint(websocket: WebSocket, call_id: str)
 # Chainlit chat UI -- must be mounted after all other routes.
 from chainlit.utils import mount_chainlit  # noqa: E402
 
-mount_chainlit(app=app, target="src/chat_app.py", path="/chat")
+mount_chainlit(app=app, target="src/chat_app.py", path="/")

@@ -47,7 +47,7 @@ An agentic appointment-scheduling application that connects the OpenAI Realtime 
 5. **Expose the server publicly:**
 
     ```bash
-    ngrok http 8000
+    ngrok http 2255
     ```
 
 6. **Configure your Twilio phone number:**
@@ -179,7 +179,7 @@ To build the image standalone:
 
 ```bash
 docker build -t scheduling-agent .
-docker run --rm -p 8000:8000 \
+docker run --rm -p 2255:2255 \
   --env-file secrets.env \
   -v $(pwd)/user_info.yaml.enc:/app/user_info.yaml.enc:ro \
   -v $(pwd)/credentials.json:/app/credentials.json:ro \
@@ -193,7 +193,7 @@ docker run --rm -p 8000:8000 \
 2. Create a Runpod Serverless or Pod endpoint using the image.
 3. Inject secrets via Runpod's **Environment Variables** settings.
 4. Mount `user_info.yaml.enc` and `credentials.json` via Runpod **Network Volumes**.
-5. Expose port 8000 and point your Twilio webhooks at the Runpod URL.
+5. Expose port 2255 and point your Twilio webhooks at the Runpod URL.
 
 > **Security:** Secrets are never baked into the image. The `.dockerignore` excludes `secrets.env`, `credentials.json`, and `user_info.yaml*`. All sensitive data is injected at runtime.
 
@@ -225,7 +225,7 @@ docker run --rm -p 8000:8000 \
 
 ## Configuration
 
-- **Port**: `PORT` env var (default: 8000)
+- **Port**: `PORT` env var (default: 2255)
 - **Prompts**: YAML files in `prompts/{incoming,outgoing,sms}/`
 - **User Info**: Encrypted in `user_info.yaml.enc`, decrypted at runtime with `USER_INFO_SECRET`
 - **Tools**: Defined in `tools.py` and `google_calendar.py`

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import logging
-import os
 
 from twilio.rest import Client as TwilioClient
+
+from .secrets import get_secret
 
 logger = logging.getLogger(__name__)
 
@@ -22,14 +23,14 @@ def send_sms(to: str, body: str, client: TwilioClient | None = None) -> str:
     if client is not None:
         _client = client
     if _client is None:
-        account_sid = os.getenv("TWILIO_ACCOUNT_SID")
-        auth_token = os.getenv("TWILIO_AUTH_TOKEN")
+        account_sid = get_secret("twilio_account_sid", "TWILIO_ACCOUNT_SID")
+        auth_token = get_secret("twilio_auth_token", "TWILIO_AUTH_TOKEN")
         if not account_sid or not auth_token:
             raise RuntimeError("Twilio credentials not configured for SMS")
         _client = TwilioClient(account_sid, auth_token)
 
     if _phone_from is None:
-        _phone_from = os.getenv("PHONE_NUMBER_FROM", "")
+        _phone_from = get_secret("twilio_phone_from", "PHONE_NUMBER_FROM") or ""
     if not _phone_from:
         raise RuntimeError("PHONE_NUMBER_FROM not configured for SMS")
 

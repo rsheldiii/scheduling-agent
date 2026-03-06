@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -12,6 +12,8 @@ class Prompt:
     name: str
     description: str
     instructions: str
+    required_context: list[str] = field(default_factory=list)
+    voice: str | None = None
 
 
 class PromptLoader:
@@ -43,6 +45,8 @@ class PromptLoader:
             name=data["name"],
             description=data["description"],
             instructions=data["instructions"].strip(),
+            required_context=data.get("required_context", []),
+            voice=data.get("voice"),
         )
 
     def _load(self, category: str) -> dict[str, Prompt]:

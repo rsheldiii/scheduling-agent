@@ -36,6 +36,15 @@ def _get_chat_manager() -> ChatAgentManager:
     return _chat_manager
 
 
+@cl.password_auth_callback
+def auth_callback(username: str, password: str) -> cl.User | None:
+    from src.server import _get_bearer_token
+
+    if password == _get_bearer_token():
+        return cl.User(identifier=username or "user")
+    return None
+
+
 @cl.on_chat_start
 async def on_chat_start() -> None:
     cl.user_session.set("history", [])
