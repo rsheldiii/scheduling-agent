@@ -13,18 +13,20 @@ services:
     volumes:
       - ./user_info.yaml.enc:/app/user_info.yaml.enc:ro
       - ./credentials.json:/app/credentials.json:ro
+      - data:/app/data
     environment:
-      - CHAINLIT_AUTH_SECRET=${CHAINLIT_AUTH_SECRET}
       - DOMAIN=${DOMAIN}
       - GOOGLE_CALENDAR_ID=${GOOGLE_CALENDAR_ID:-primary}
       - GOOGLE_CALENDAR_CREDENTIALS=/app/credentials.json
       - TWILIO_SIGNATURE_VALIDATION=${TWILIO_SIGNATURE_VALIDATION:-true}
+      - RATE_LIMIT_CALLS_PER_HOUR=${RATE_LIMIT_CALLS_PER_HOUR:-30}
       - PORT=2255
     deploy:
       resources:
         limits:
           cpus: "2.0"
           memory: 1G
+
 
 secrets:
   api_bearer_token:
@@ -39,3 +41,6 @@ secrets:
     environment: PHONE_NUMBER_FROM
   user_info_secret:
     environment: USER_INFO_SECRET
+
+volumes:
+  data:

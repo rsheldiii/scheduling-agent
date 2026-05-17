@@ -1,0 +1,32 @@
+services:
+  scheduling-agent:
+    build: .
+    ports:
+      - "2255:2255"
+    env_file: secrets.env
+    environment:
+      - GOOGLE_CALENDAR_CREDENTIALS=/app/credentials.json
+      - TWILIO_SIGNATURE_VALIDATION=false
+      - PORT=2255
+    volumes:
+      - ./src:/app/src:ro
+      - ./user_info.yaml.enc:/app/user_info.yaml.enc:ro
+      - ./credentials.json:/app/credentials.json:ro
+      - data:/app/data
+
+  chainlit:
+    build: .
+    command: uv run chainlit run src/chat_app.py --host 0.0.0.0
+    ports:
+      - "8000:8000"
+    env_file: secrets.env
+    environment:
+      - MCP_SERVER_URL=http://scheduling-agent:2255/mcp/sse
+      - PYTHONPATH=/app
+    volumes:
+      - ./src:/app/src:ro
+    depends_on:
+      - scheduling-agent
+
+volumes:
+  data:
