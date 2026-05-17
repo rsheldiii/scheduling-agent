@@ -23,3 +23,6 @@ credentials.json
 
 # Chainlit auto-generated config and translations
 .chainlit/
+
+# .mcp.json
+.mcp.json
