@@ -33,9 +33,10 @@ class TwilioHandler:
         self._message_loop_task: asyncio.Task[None] | None = None
         self._end_call_task: asyncio.Task[None] | None = None
         self._end_call_event = asyncio.Event()
-        self._audio_done_after_end = asyncio.Event()
 
         self._stream_sid: str | None = None
+        self._first_twilio_audio = True
+        self._first_openai_audio = True
 
         self._mark_counter = 0
         self._mark_data: dict[
@@ -114,9 +115,9 @@ class TwilioHandler:
 
         @function_tool
         def end_call() -> str:
-            """End the phone call. Call this when the conversation is complete and goodbyes have been exchanged."""
+            """Hang up the phone. Call this AFTER you've already said a natural goodbye (e.g. "Thanks, bye!"). Do NOT announce that you are ending the call -- just say bye like a normal person, then call this tool silently."""
             end_call_event.set()
-            return "Ending the call now."
+            return ""
 
         agent = self.agent.clone(tools=[*self.agent.tools, end_call])
         runner = RealtimeRunner(agent)
@@ -128,6 +129,7 @@ class TwilioHandler:
             model_config={
                 "api_key": api_key,
                 "initial_model_settings": {
+                    "model_name": "gpt-realtime-2",
                     "input_audio_format": "audio/pcmu",
                     "output_audio_format": "audio/pcmu",
                     "voice": voice,
@@ -211,26 +213,34 @@ class TwilioHandler:
                 logger.info("Twilio message loop ended: %s", e)
 
     async def _end_call_watcher(self) -> None:
-        """Wait for the end_call tool to fire, let the model finish speaking, then disconnect.
+        """Wait for the end_call tool to fire, let Twilio finish playing audio, then disconnect.
 
-        After the tool fires we wait for the next ``audio_end`` event (the
-        model finishing its final response) before closing.  A hard timeout
-        prevents hanging forever if the event never arrives.
+        By the time ``end_call`` is invoked the goodbye audio has already been
+        fully streamed to Twilio (the model generates audio first, then calls
+        the tool in the same turn).  We just need to wait for the pending
+        Twilio marks to drain, confirming the audio was actually played.
         """
         try:
             await self._end_call_event.wait()
-            logger.info("end_call triggered, waiting for final audio to finish")
-            try:
-                await asyncio.wait_for(self._audio_done_after_end.wait(), timeout=10.0)
-            except asyncio.TimeoutError:
-                logger.warning("Timed out waiting for final audio after end_call")
-            await asyncio.sleep(0.5)
+            logger.info("end_call triggered, waiting for Twilio playback to finish")
+            await self._wait_for_marks_drained(timeout=10.0)
             logger.info("Closing Twilio WebSocket")
             await self.twilio_websocket.close()
         except asyncio.CancelledError:
             pass
         except Exception as e:
             logger.debug("Error in end_call watcher: %s", e)
+
+    async def _wait_for_marks_drained(self, timeout: float = 10.0) -> None:
+        """Poll until all Twilio marks have been acknowledged (audio fully played)."""
+        try:
+            async with asyncio.timeout(timeout):
+                while self._mark_data:
+                    await asyncio.sleep(0.1)
+        except TimeoutError:
+            logger.warning(
+                "Timed out waiting for %d Twilio marks to drain", len(self._mark_data)
+            )
 
     # ------------------------------------------------------------------
     # Event handlers
@@ -239,6 +249,12 @@ class TwilioHandler:
     async def _handle_realtime_event(self, event: RealtimeSessionEvent) -> None:
         """Handle events from the realtime session."""
         if event.type == "audio":
+            if self._end_call_event.is_set():
+                return
+            if self._first_openai_audio:
+                logger.info("First audio chunk received from OpenAI")
+                self._first_openai_audio = False
+
             base64_audio = base64.b64encode(event.audio.data).decode("utf-8")
             await self.twilio_websocket.send_text(
                 json.dumps(
@@ -273,19 +289,20 @@ class TwilioHandler:
             await self.twilio_websocket.send_text(
                 json.dumps({"event": "clear", "streamSid": self._stream_sid})
             )
-        elif event.type == "audio_end":
-            logger.debug("Audio end")
-            if self._end_call_event.is_set():
-                self._audio_done_after_end.set()
         elif event.type == "history_updated":
             self._history = list(event.history)
         elif event.type == "history_added":
             self._history.append(event.item)
             self._log_transcript_item(event.item)
         elif event.type == "raw_model_event":
-            pass
+            raw = event.data
+            raw_type = getattr(raw, "type", None)
+            if raw_type == "error":
+                logger.error("OpenAI realtime error: %s", getattr(raw, "error", raw))
+            else:
+                logger.info("Raw model event: %s", raw_type)
         else:
-            pass
+            logger.info("Unhandled session event: %s", event.type)
 
     def _log_transcript_item(self, item: Any) -> None:
         """Log a single transcript item as it arrives."""
@@ -328,6 +345,9 @@ class TwilioHandler:
         payload = media.get("payload", "")
         if payload:
             try:
+                if self._first_twilio_audio:
+                    logger.info("First audio chunk received from Twilio")
+                    self._first_twilio_audio = False
                 await self.session.send_audio(base64.b64decode(payload))
             except Exception as e:
                 logger.error("Error forwarding audio to OpenAI: %s", e)
