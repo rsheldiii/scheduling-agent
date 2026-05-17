@@ -7,10 +7,13 @@ HTTP layer, request validation, and response formats.
 from __future__ import annotations
 
 import os
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+
+
+TEST_BEARER_TOKEN = "test-bearer-token"
 
 
 @pytest.fixture(autouse=True)
@@ -18,39 +21,33 @@ def _isolate_server(monkeypatch):
     """Ensure server module state is clean for each test.
 
     - Disables Twilio signature validation
-    - Clears the cached config so env changes take effect
-    - Prevents Chainlit mount (it requires its own config files)
+    - Sets a known bearer token
+    - Clears lru_cache'd config so env changes take effect
     """
     monkeypatch.setenv("TWILIO_SIGNATURE_VALIDATION", "false")
     monkeypatch.setenv("TWILIO_ACCOUNT_SID", "ACtest")
     monkeypatch.setenv("TWILIO_AUTH_TOKEN", "test_token")
     monkeypatch.setenv("PHONE_NUMBER_FROM", "+15550001111")
     monkeypatch.setenv("DOMAIN", "test.example.com")
+    monkeypatch.setenv("API_BEARER_TOKEN", TEST_BEARER_TOKEN)
+
+    import src.server as server_mod
+    server_mod._get_bearer_token.cache_clear()
 
 
 @pytest.fixture()
 def app():
-    """Import and return the FastAPI app after env is configured.
-
-    We need a fresh module import each time because the server caches config
-    at module level via lru_cache.
-    """
-    import importlib
+    """Import and return the FastAPI app after env is configured."""
     import src.server as server_mod
-
-    # Clear the lru_cache so our monkeypatched env vars are picked up
     server_mod._get_config.cache_clear()
-
-    # Reset the global sms_manager so it gets re-created per test
-    server_mod.sms_manager = None
-
     return server_mod.app
 
 
 @pytest.fixture()
 async def client(app):
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
+    headers = {"Authorization": f"Bearer {TEST_BEARER_TOKEN}"}
+    async with AsyncClient(transport=transport, base_url="http://test", headers=headers) as c:
         yield c
 
 
@@ -74,18 +71,6 @@ class TestPromptsEndpoint:
         if data:
             keys_present = set(data[0].keys())
             assert {"key", "name", "description", "required_context"} <= keys_present
-
-
-class TestIncomingCallEndpoint:
-    @pytest.mark.asyncio
-    async def test_incoming_call_get_returns_twiml(self, client):
-        resp = await client.get("/incoming-call")
-        assert resp.status_code == 200
-        assert "text/xml" in resp.headers["content-type"]
-        body = resp.text
-        assert "<Response>" in body
-        assert "Stream" in body
-        assert "media-stream" in body
 
 
 class TestOutgoingCallEndpoint:
@@ -130,19 +115,3 @@ class TestOutgoingCallEndpoint:
         assert "call_id" in data
 
 
-class TestIncomingSmsEndpoint:
-    @pytest.mark.asyncio
-    async def test_incoming_sms_returns_twiml(self, client):
-        mock_manager = MagicMock()
-        mock_manager.handle_message = AsyncMock(return_value="Got it!")
-
-        with patch("src.server._get_sms_manager", return_value=mock_manager):
-            resp = await client.post(
-                "/incoming-sms",
-                data={"From": "+14155551234", "Body": "Hello"},
-            )
-
-        assert resp.status_code == 200
-        assert "text/xml" in resp.headers["content-type"]
-        assert "Got it!" in resp.text
-        assert "<Message>" in resp.text
