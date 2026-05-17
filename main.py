@@ -27,7 +27,7 @@ if __name__ == "__main__":
             info = decrypt_and_load()
             print(yaml.dump(info, default_flow_style=False))
     elif command == "serve":
-        from src.server import app
+        from src.app import app
 
         port = int(os.getenv("PORT", 2255))
         uvicorn.run(app, host="0.0.0.0", port=port)
