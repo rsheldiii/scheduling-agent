@@ -8,11 +8,40 @@ from agents.realtime import RealtimeAgent
 
 from ...prompts import Prompt, PromptLoader
 from ...tools.common import get_current_time, get_weather
+from ...tools.google_calendar import get_calendar_events
+from ...tools.memory import get_memory, load_memory
 from ...tools.user_info import get_user_info, load_user_info, render_template
 
 _prompts = PromptLoader(Path(__file__).parent / "prompts")
 
-_SHARED_TOOLS: list[Any] = [get_weather, get_current_time, get_user_info]
+_SHARED_TOOLS: list[Any] = [get_weather, get_current_time, get_user_info, get_calendar_events, get_memory]
+
+_PHONE_PERSONA = """\
+You are on a real phone call with a real person. You must sound exactly like a \
+normal human caller -- natural, conversational, and warm.
+
+RULES:
+- Use natural filler and reactions: "oh great", "gotcha", "perfect", "hmm", \
+"alright", "sounds good", etc.
+- Speak in short, casual sentences. Real people don't monologue on the phone.
+- This is a live two-way call, not a voicemail. After you deliver your message \
+or ask your question, stop talking and wait for the other person to respond. \
+Do not linger with closing questions before they've had a chance to react.
+- Let the conversation end naturally: when the other person signals they're \
+done (acknowledges, thanks you, says bye), say a brief goodbye and hang up.
+- GOODBYE RULE: Say a natural verbal goodbye before calling end_call. \
+Never call end_call without first saying goodbye out loud in that same turn.
+- Match the energy of the person you're speaking with. If they're casual, be \
+casual. If they're formal, be polite but still human.
+- It's okay to pause, react, or say "uh" / "um" occasionally -- that's normal.
+- Don't over-explain or narrate what you're doing. Just have the conversation.
+- SCHEDULING RULE: Before agreeing to or confirming any specific date or time, \
+call get_calendar_events to check availability. Use your judgment: a vague \
+all-day note like "buy flowers" is not a real conflict; a timed appointment or \
+clear commitment is. If a proposed time conflicts with something real, offer an \
+alternative. If the calendar is clear, confirm confidently.
+
+"""
 
 
 @dataclass(frozen=True)
@@ -22,18 +51,21 @@ class AgentWithVoice:
     voice: str | None
 
 
-def create_incoming_call_agent() -> AgentWithVoice:
-    """Create a RealtimeAgent configured for handling incoming calls.
+def _memory_block() -> str:
+    memory = load_memory()
+    if not memory:
+        return ""
+    return f"\nPAST CALL MEMORY:\n{memory}\n"
 
-    Incoming calls could be from anyone, so the agent uses a generic,
-    receptive prompt that asks the caller to identify themselves and
-    state the purpose of their call.
-    """
+
+def create_incoming_call_agent() -> AgentWithVoice:
+    """Create a RealtimeAgent configured for handling incoming calls."""
     user_info = load_user_info()
     prompt = _prompts.get("default", category="incoming")
+    instructions = _PHONE_PERSONA + _memory_block() + render_template(prompt.instructions, user_info)
     agent = RealtimeAgent(
         name=prompt.name,
-        instructions=render_template(prompt.instructions, user_info),
+        instructions=instructions,
         tools=_SHARED_TOOLS,
     )
     return AgentWithVoice(agent=agent, voice=prompt.voice)
@@ -43,23 +75,17 @@ def create_outgoing_call_agent(
     prompt_key: str | None = None,
     additional_context: str | None = None,
 ) -> AgentWithVoice:
-    """Create a RealtimeAgent configured for making outgoing calls.
-
-    Outgoing calls have a known purpose -- we know exactly who we are
-    calling and why. The prompt_key selects which scenario to use;
-    defaults to 'doctor_appointment' if not specified. The caller can
-    supply additional_context with instance-specific details (dates,
-    preferences, etc.) that get injected into the prompt template.
-    """
+    """Create a RealtimeAgent configured for making outgoing calls."""
     user_info = load_user_info()
     prompt = _prompts.get(prompt_key or "doctor_appointment", category="outgoing")
     template_vars = {
         **user_info,
         "additional_context": additional_context or "No additional context provided.",
     }
+    instructions = _PHONE_PERSONA + _memory_block() + render_template(prompt.instructions, template_vars)
     agent = RealtimeAgent(
         name=prompt.name,
-        instructions=render_template(prompt.instructions, template_vars),
+        instructions=instructions,
         tools=_SHARED_TOOLS,
     )
     return AgentWithVoice(agent=agent, voice=prompt.voice)
