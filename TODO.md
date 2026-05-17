@@ -26,13 +26,11 @@ This application will be, at it's core, a scheduling application. It will benefi
 
 There is one catch, however: realtime agents do not persist beyond the call, and it's feasible that a call would end while an agent was calling the calendar tool to set the appointment. we'll have to capture the transcript of the call while the call is happening, then spin up a regular agent with the call transcript to actually make the calendar event. This represents a paradigm shift from single-agent to multi-agent orchestration in our application, so we must handle it carefully.
 
-## texting integration (Status: DONE)
+## MCP interface (Status: DONE, replaces texting integration)
 
-We already use Twilio, we should allow the user to text the application once it's running!
+The primary interface to the application is now an MCP server, which Claude (or any MCP-compatible client) can connect to. The MCP server exposes three tools: prepare_call (LLM-powered scenario selection + question generation), place_call (triggers the outgoing call), and get_call_outcome (polls for the post-call summary).
 
-When the user texts the phone number, they talk to a non-realtime chat agent. That chat agent has their information, and uses the conversation with the user to orchestrate the call. how that orchestration happens is left up to the implementer, but this is effectively shifting the interface to the application, so it must be approached carefully.
-
-Additionally, when a call is finished, it would be nice if the user was also updated with a summary of how the call went, sent via text.
+This replaces the earlier SMS-based orchestration approach.
 
 ## Runpod / Docker Container runtime (Status: DONE)
 

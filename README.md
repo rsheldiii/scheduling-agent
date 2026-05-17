@@ -1,6 +1,6 @@
 # Realtime Scheduling Agent
 
-An agentic appointment-scheduling application that connects the OpenAI Realtime API to phone calls via Twilio Media Streams. The agent can make and receive calls, create Google Calendar events, and be orchestrated entirely over SMS.
+An agentic appointment-scheduling application that connects the OpenAI Realtime API to phone calls via Twilio Media Streams. The agent can make and receive calls, create Google Calendar events, and is orchestrated via an MCP server that any MCP-compatible client (such as Claude) can connect to.
 
 ## Prerequisites
 
@@ -26,13 +26,14 @@ An agentic appointment-scheduling application that connects the OpenAI Realtime 
     TWILIO_ACCOUNT_SID=AC...
     TWILIO_AUTH_TOKEN=...
     PHONE_NUMBER_FROM=+1...
-    DOMAIN=your-ngrok-url.ngrok.io
+    DOMAIN=your-ngrok-url.ngrok-free.dev   # hostname only — no https:// prefix
     USER_INFO_SECRET=your-encryption-password
+    API_BEARER_TOKEN=your-secret-token     # required for MCP and API access
     GOOGLE_CALENDAR_CREDENTIALS=credentials.json   # optional
     GOOGLE_CALENDAR_ID=you@gmail.com                # optional
     ```
 
-3. **Set up user info.** Edit `user_info.yaml` with your details (including `phone_number` for SMS summaries), then encrypt:
+3. **Set up user info.** Edit `user_info.yaml` with your details, then encrypt:
 
     ```bash
     uv run python user_info.py encrypt
@@ -52,7 +53,13 @@ An agentic appointment-scheduling application that connects the OpenAI Realtime 
 
 6. **Configure your Twilio phone number:**
     - Set the **Voice** webhook to: `https://<domain>/incoming-call` (POST)
-    - Set the **Messaging** webhook to: `https://<domain>/incoming-sms` (POST)
+
+7. **Add the MCP server to your client** (e.g. Claude):
+
+    ```bash
+    claude mcp add --transport sse scheduling-agent https://<domain>/mcp/sse \
+      --header "Authorization: Bearer <your-api-bearer-token>"
+    ```
 
 ## Features
 
@@ -62,23 +69,25 @@ An agentic appointment-scheduling application that connects the OpenAI Realtime 
 - **Outgoing:** `POST /outgoing-call` with `{"to": "+1...", "prompt": "doctor_appointment"}` to have the agent call on your behalf.
 - Prompts are YAML files in `prompts/outgoing/` — add new scenarios by dropping in a new file.
 
+### MCP Orchestration
+
+The primary interface for triggering outgoing calls is an MCP server. Any MCP-compatible client (e.g. Claude) can connect to it and use three tools:
+
+- **`prepare_call`** — describes the call scenario and asks the LLM to gather any missing context (e.g. preferred appointment times, special requests).
+- **`place_call`** — triggers the outgoing call with the gathered context.
+- **`get_call_outcome`** — polls for the post-call summary (calls typically take 1–5 minutes).
+
 ### Post-Call Processing
 
 When a call ends, the captured transcript is handed to a non-realtime post-call agent that:
 
-1. Determines whether an appointment was scheduled.
-2. Creates a Google Calendar event if so.
-3. Sends the user an SMS summary of the call.
+1. Summarizes what happened on the call.
+2. Creates a Google Calendar event if an appointment was confirmed.
+3. Records a persistent memory entry so future calls have context (e.g. "awaiting callback from Dr. Smith's office").
 
-### SMS / Texting
+### Persistent Memory
 
-Text the Twilio number to interact with a non-realtime chat agent. The SMS agent can:
-
-- List available call prompts.
-- Initiate outgoing calls on your behalf.
-- Look up your personal information.
-
-Multi-turn conversation state is maintained per phone number.
+After every call the post-call agent writes a brief outcome summary to a SQLite-backed memory store. When the next call starts, that memory is injected into the realtime agent's context — so if a business calls back, the agent already knows why.
 
 ### Google Calendar Integration
 
@@ -155,15 +164,17 @@ Start the server and make a test call that results in a scheduled appointment. T
 
 ## API Endpoints
 
+All endpoints except `/health` require `Authorization: Bearer <token>`.
+
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/` | Health check |
+| GET | `/health` | Health check (unauthenticated) |
 | GET | `/prompts` | List available outgoing-call prompts |
-| POST/GET | `/incoming-call` | Twilio voice webhook |
+| POST | `/incoming-call` | Twilio voice webhook (validated via Twilio signature) |
 | POST | `/outgoing-call` | Initiate an outgoing call |
-| POST | `/incoming-sms` | Twilio SMS webhook |
 | WS | `/media-stream` | WebSocket for incoming calls |
 | WS | `/media-stream/{call_id}` | WebSocket for outgoing calls |
+| SSE | `/mcp/sse` | MCP server endpoint |
 
 ## Docker Deployment
 
@@ -200,32 +211,51 @@ docker run --rm -p 2255:2255 \
 ## Architecture
 
 ```
-                      ┌──────────────┐
-  Phone Call ──────►  │    Twilio     │
-                      └──────┬───────┘
-                   Voice ▼        ▲ SMS
-              ┌──────────────┐  ┌──────────────┐
-              │  TwilioHandler│  │  SmsAgent    │
-              │  (Realtime)   │  │  (Non-RT)    │
-              └──────┬───────┘  └──────┬───────┘
-                     ▼                 │
-              ┌──────────────┐         │
-              │ OpenAI RT API│         │
-              └──────┬───────┘         │
-                     ▼                 ▼
-              ┌──────────────┐  ┌──────────────┐
-              │ Post-Call    │  │ Orchestrate  │
-              │ Agent (Non-RT)│  │ Outgoing Call│
-              └──────┬───────┘  └──────────────┘
-                     ▼
-              ┌──────────────┐
-              │Google Calendar│
-              └──────────────┘
+  MCP Client  ──────►  ┌──────────────┐
+  (e.g. Claude)        │  MCP Server  │ (/mcp/sse, bearer auth)
+                        └──────┬───────┘
+                               │ place_call / get_call_outcome
+                               ▼
+  Phone Call ──────►  ┌──────────────┐
+                       │    Twilio    │
+                       └──────┬───────┘
+                              │ Media Stream WebSocket
+                              ▼
+                       ┌──────────────┐
+                       │ TwilioHandler│ ◄──► OpenAI Realtime API
+                       │ (Realtime)   │      (gpt-realtime-2)
+                       └──────┬───────┘
+                              │ transcript on hang-up
+                              ▼
+                       ┌──────────────┐
+                       │  Post-Call   │
+                       │  Agent       │
+                       └──────┬───────┘
+                              │
+                    ┌─────────┼──────────┐
+                    ▼         ▼          ▼
+             ┌──────────┐ ┌───────┐ ┌────────┐
+             │ Google   │ │Memory │ │ MCP    │
+             │ Calendar │ │ (DB)  │ │ result │
+             └──────────┘ └───────┘ └────────┘
 ```
 
 ## Configuration
 
-- **Port**: `PORT` env var (default: 2255)
-- **Prompts**: YAML files in `prompts/{incoming,outgoing,sms}/`
-- **User Info**: Encrypted in `user_info.yaml.enc`, decrypted at runtime with `USER_INFO_SECRET`
-- **Tools**: Defined in `tools.py` and `google_calendar.py`
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `2255` | HTTP server port |
+| `DOMAIN` | — | Public hostname (no `https://` prefix) |
+| `API_BEARER_TOKEN` | random | Token for all API and MCP access |
+| `RATE_LIMIT_CALLS_PER_HOUR` | `30` | Max outgoing calls per hour per token |
+| `DATA_DIR` | `./data` | Directory for SQLite database |
+| `TWILIO_SIGNATURE_VALIDATION` | `true` | Set to `false` for local dev only |
+| `GOOGLE_CALENDAR_ID` | — | Calendar ID (omit to disable calendar) |
+| `GOOGLE_CALENDAR_CREDENTIALS` | — | Path to service account JSON key |
+
+## Security
+
+- **Bearer token is required** for all API endpoints (`/prompts`, `/outgoing-call`) and the MCP server (`/mcp/sse`). If `API_BEARER_TOKEN` is not set, a random token is generated and printed to the log on startup.
+- **The MCP endpoint should not be exposed publicly without auth.** The bearer middleware on `/mcp/sse` enforces this, but double-check your reverse proxy or tunnel configuration.
+- **Rotate credentials** if they are ever exposed: `API_BEARER_TOKEN`, `OPENAI_API_KEY`, `TWILIO_AUTH_TOKEN`, and `USER_INFO_SECRET`. Each is injected at runtime and never baked into the Docker image.
+- **Twilio signature validation** is enabled by default. Only disable it (`TWILIO_SIGNATURE_VALIDATION=false`) for local development — without it, anyone who knows your webhook URL can trigger incoming-call handling.
