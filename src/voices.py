@@ -1,8 +1,7 @@
 """Available OpenAI Realtime API voices.
 
 The Realtime API does not expose a dynamic endpoint for listing voices, so we
-maintain the canonical set here.  Last updated for the Aug 2025 GA release of
-gpt-realtime (cedar + marin additions).
+maintain the canonical set here.  Last updated for gpt-realtime-2.
 """
 
 from __future__ import annotations

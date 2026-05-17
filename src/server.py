@@ -1,7 +1,9 @@
+import asyncio
 import logging
 import os
 import re
 import secrets
+import time
 import uuid
 from functools import lru_cache
 
@@ -9,22 +11,32 @@ from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSock
 from fastapi.responses import PlainTextResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, field_validator
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
+from starlette.responses import Response
 from twilio.request_validator import RequestValidator
 from twilio.rest import Client as TwilioClient
-from twilio.twiml.messaging_response import MessagingResponse
 from twilio.twiml.voice_response import Connect, VoiceResponse
 
 from .agent_factory.realtime.agent import create_incoming_call_agent, create_outgoing_call_agent, list_outgoing_prompts
 from .agent_factory.post_call.agent import run_post_call_agent
-from .agent_factory.sms.agent import SmsAgentManager
+from .persistence import init_db
 from .secrets import get_secret
-from .sms import send_sms
 from .twilio_handler import TwilioHandler
-from .tools.user_info import load_user_info
 
 logger = logging.getLogger(__name__)
 
 _bearer_scheme = HTTPBearer()
+
+def _rate_limit_key(request: Request) -> str:
+    """Use the bearer token as the rate-limit key so limits are per-token."""
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        return auth[len("Bearer "):]
+    return get_remote_address(request)
+
+_limiter = Limiter(key_func=_rate_limit_key)
 
 
 @lru_cache
@@ -94,6 +106,7 @@ class OutgoingCallRequest(BaseModel):
     prompt: str | None = None
     additional_context: str | None = None
     voice: str | None = None
+    request_id: str | None = None
 
     @field_validator("to")
     @classmethod
@@ -104,57 +117,92 @@ class OutgoingCallRequest(BaseModel):
             )
         return v
 
+    @field_validator("voice")
+    @classmethod
+    def validate_voice(cls, v: str | None) -> str | None:
+        if v is not None:
+            from .voices import is_valid_voice
+            if not is_valid_voice(v):
+                raise ValueError(f"Unknown voice '{v}'. See GET /voices for valid options.")
+        return v
+
+
+_PENDING_CALL_TTL = 5 * 60  # seconds
+
 
 class TwilioWebSocketManager:
     def __init__(self) -> None:
         self._pending_calls: dict[str, dict[str, str | None]] = {}
+        self._pending_call_times: dict[str, float] = {}
+        self._completion_futures: dict[str, asyncio.Future[str]] = {}
 
     def register_pending_call(self, call_id: str, context: dict[str, str | None]) -> None:
         self._pending_calls[call_id] = context
+        self._pending_call_times[call_id] = time.monotonic()
+
+    def _sweep_stale_calls(self) -> None:
+        now = time.monotonic()
+        stale = [cid for cid, t in self._pending_call_times.items() if now - t > _PENDING_CALL_TTL]
+        for cid in stale:
+            self._pending_calls.pop(cid, None)
+            self._pending_call_times.pop(cid, None)
+            future = self._completion_futures.pop(cid, None)
+            if future and not future.done():
+                future.cancel()
+            logger.warning("Swept stale pending call: %s", cid)
+
+    def register_completion_future(self, call_id: str) -> asyncio.Future[str]:
+        """Create a Future that will be resolved when the call completes."""
+        future: asyncio.Future[str] = asyncio.get_event_loop().create_future()
+        self._completion_futures[call_id] = future
+        return future
+
+    def resolve_call(self, call_id: str, summary: str) -> None:
+        """Resolve the completion Future for a finished call."""
+        future = self._completion_futures.pop(call_id, None)
+        if future and not future.done():
+            future.set_result(summary)
 
     async def new_session(
         self, websocket: WebSocket, call_id: str | None = None
-    ) -> TwilioHandler:
+    ) -> tuple[TwilioHandler, str | None]:
         """Create a new TwilioHandler session.
 
-        If call_id is provided and matches a pending outgoing call, an outgoing
-        agent is created. Otherwise, a generic incoming-call agent is used.
+        Returns the handler and the MCP request_id (if this is an MCP-triggered call).
         """
+        self._sweep_stale_calls()
         if call_id and call_id in self._pending_calls:
             context = self._pending_calls.pop(call_id)
+            self._pending_call_times.pop(call_id, None)
             prompt_key = context.get("prompt")
             additional_context = context.get("additional_context")
             request_voice = context.get("voice")
+            request_id = context.get("request_id")
             logger.info("Creating outgoing call handler (call_id=%s, to=%s, prompt=%s)", call_id, context.get("to"), prompt_key)
             result = create_outgoing_call_agent(prompt_key=prompt_key, additional_context=additional_context)
             voice = request_voice or result.voice
+            return TwilioHandler(websocket, result.agent, voice=voice), request_id
         else:
             logger.info("Creating incoming call handler")
             result = create_incoming_call_agent()
             voice = result.voice
+            request_id = None
 
-        return TwilioHandler(websocket, result.agent, voice=voice)
+        return TwilioHandler(websocket, result.agent, voice=voice), request_id
 
 
 manager = TwilioWebSocketManager()
 app = FastAPI()
+app.state.limiter = _limiter
+app.add_exception_handler(
+    RateLimitExceeded,
+    lambda request, exc: Response("Rate limit exceeded", status_code=429),
+)
 
-sms_manager: SmsAgentManager | None = None
 
-
-def _get_sms_manager() -> SmsAgentManager:
-    """Lazily initialize the SMS agent manager to avoid import-time side effects."""
-    global sms_manager
-    if sms_manager is None:
-        cfg = _get_config()
-        twilio_client = TwilioClient(cfg["twilio_account_sid"], cfg["twilio_auth_token"])
-        sms_manager = SmsAgentManager(
-            ws_manager=manager,
-            twilio_client=twilio_client,
-            phone_from=cfg["phone_number_from"] or "",
-            domain=cfg["domain"] or "",
-        )
-    return sms_manager
+@app.on_event("startup")
+async def _startup() -> None:
+    init_db()
 
 
 @app.get("/health")
@@ -172,7 +220,6 @@ async def prompts() -> list[dict]:
 
 
 @app.post("/incoming-call", dependencies=[Depends(_validate_twilio_signature)])
-@app.get("/incoming-call")
 async def incoming_call(request: Request) -> PlainTextResponse:
     """Handle incoming Twilio phone calls."""
     host = request.headers.get("Host")
@@ -193,8 +240,14 @@ async def incoming_call(request: Request) -> PlainTextResponse:
     return PlainTextResponse(content=str(response), media_type="text/xml")
 
 
+def _call_rate_limit() -> str:
+    limit = os.getenv("RATE_LIMIT_CALLS_PER_HOUR", "30")
+    return f"{limit}/hour"
+
+
 @app.post("/outgoing-call", dependencies=[Depends(_validate_bearer_token)])
-async def outgoing_call(request: OutgoingCallRequest) -> dict[str, str | None]:
+@_limiter.limit(_call_rate_limit)
+async def outgoing_call(request: Request, body: OutgoingCallRequest) -> dict[str, str | None]:
     """Initiate an outgoing phone call via Twilio."""
     cfg = _get_config()
     required_vars = {
@@ -213,50 +266,41 @@ async def outgoing_call(request: OutgoingCallRequest) -> dict[str, str | None]:
     call_id = str(uuid.uuid4())
     manager.register_pending_call(
         call_id, {
-            "to": request.to,
-            "prompt": request.prompt,
-            "additional_context": request.additional_context,
-            "voice": request.voice,
+            "to": body.to,
+            "prompt": body.prompt,
+            "additional_context": body.additional_context,
+            "voice": body.voice,
+            "request_id": body.request_id,
         }
     )
 
     twilio_client = TwilioClient(cfg["twilio_account_sid"], cfg["twilio_auth_token"])
 
-    response = VoiceResponse()
+    twiml = VoiceResponse()
     connect = Connect()
     connect.stream(url=f"wss://{cfg['domain']}/media-stream/{call_id}")
-    response.append(connect)
+    twiml.append(connect)
 
-    call = twilio_client.calls.create(
-        from_=cfg["phone_number_from"],
-        to=request.to,
-        twiml=str(response),
-    )
+    try:
+        call = twilio_client.calls.create(
+            from_=cfg["phone_number_from"],
+            to=body.to,
+            twiml=str(twiml),
+        )
+    except Exception as e:
+        manager._pending_calls.pop(call_id, None)
+        logger.error("Twilio call creation failed: %s", e)
+        raise HTTPException(status_code=502, detail=f"Failed to initiate call: {e}") from e
 
-    logger.info("Outgoing call initiated: call_id=%s, call_sid=%s, to=%s", call_id, call.sid, request.to)
+    logger.info("Outgoing call initiated: call_id=%s, call_sid=%s, to=%s", call_id, call.sid, body.to)
 
     return {"call_id": call_id, "call_sid": call.sid, "status": call.status}
 
 
-@app.post("/incoming-sms", dependencies=[Depends(_validate_twilio_signature)])
-async def incoming_sms(request: Request) -> PlainTextResponse:
-    """Handle incoming Twilio SMS messages."""
-    form = await request.form()
-    from_number = form.get("From", "")
-    body = form.get("Body", "")
-    logger.info("SMS from %s: %s", from_number, body)
-
-    mgr = _get_sms_manager()
-    reply = await mgr.handle_message(str(from_number), str(body))
-
-    response = MessagingResponse()
-    response.message(reply)
-    return PlainTextResponse(content=str(response), media_type="text/xml")
-
 
 async def _handle_media_stream(websocket: WebSocket, call_id: str | None = None) -> None:
     """Shared handler for Twilio Media Stream WebSocket connections."""
-    handler = await manager.new_session(websocket, call_id=call_id)
+    handler, request_id = await manager.new_session(websocket, call_id=call_id)
     try:
         async with handler:
             await handler.wait_until_done()
@@ -267,14 +311,16 @@ async def _handle_media_stream(websocket: WebSocket, call_id: str | None = None)
     finally:
         await handler.cleanup()
         transcript = handler.get_transcript()
+        summary = ""
         if transcript:
             try:
-                summary = await run_post_call_agent(transcript)
-                user_phone = load_user_info().get("phone_number")
-                if user_phone and summary:
-                    send_sms(user_phone, f"Call summary:\n{summary}")
+                summary = await run_post_call_agent(transcript, request_id=request_id)
             except Exception as e:
                 logger.error("Post-call agent error: %s", e)
+        if call_id:
+            manager.resolve_call(
+                call_id, summary or "Call completed, no summary available."
+            )
 
 
 @app.websocket("/media-stream")
@@ -288,8 +334,3 @@ async def media_stream_with_call_id_endpoint(websocket: WebSocket, call_id: str)
     """WebSocket endpoint for outgoing calls (with call_id in path)."""
     await _handle_media_stream(websocket, call_id=call_id)
 
-
-# Chainlit chat UI -- must be mounted after all other routes.
-from chainlit.utils import mount_chainlit  # noqa: E402
-
-mount_chainlit(app=app, target="src/chat_app.py", path="/")
