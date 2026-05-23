@@ -148,6 +148,29 @@ Copy `.env.example` to `secrets.env` and fill in:
 
 ---
 
+## User Info
+
+`user_info.yaml` holds the personal details the agent uses when making calls — your name, date of birth, last four of your SSN, etc. It's injected into every outgoing call prompt as template variables.
+
+```yaml
+name: Jane Smith
+date_of_birth: January 1st, 1990
+age: 35
+ssn_last_four: "1234"
+```
+
+The file is encrypted before use. Edit it, then run:
+
+```bash
+uv run python main.py encrypt
+```
+
+This produces `user_info.yaml.enc` (the only file the server reads at runtime). The plaintext `user_info.yaml` is gitignored — never commit it. `USER_INFO_SECRET` is the decryption password; keep it in `secrets.env` and out of version control.
+
+In Docker/Railway deployments, mount `user_info.yaml.enc` as a file and set `USER_INFO_SECRET` as an env var — the plaintext file never needs to exist on the server.
+
+---
+
 ## Environment Variables
 
 | Variable | Default | Description |
