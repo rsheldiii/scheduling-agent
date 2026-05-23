@@ -66,3 +66,29 @@ class TestTwilioWebSocketManager:
         mgr.register_pending_call("a", {"to": "+1"})
         mgr.register_pending_call("a", {"to": "+2"})
         assert mgr._pending_calls["a"]["to"] == "+2"
+
+
+class TestCallerInfo:
+    def test_register_and_pop(self):
+        mgr = TwilioWebSocketManager()
+        mgr.register_caller_info("CAtest", "Alice")
+        assert mgr.pop_caller_info("CAtest") == "Alice"
+        assert "CAtest" not in mgr._caller_info
+
+    def test_pop_missing_returns_none(self):
+        mgr = TwilioWebSocketManager()
+        assert mgr.pop_caller_info("nonexistent") is None
+
+    def test_register_none_caller(self):
+        mgr = TwilioWebSocketManager()
+        mgr.register_caller_info("CAtest", None)
+        assert mgr.pop_caller_info("CAtest") is None
+
+    def test_sweep_removes_stale_caller_info(self):
+        import time
+
+        mgr = TwilioWebSocketManager()
+        mgr.register_caller_info("CAold", "Bob")
+        mgr._caller_info_times["CAold"] = time.monotonic() - 999
+        mgr._sweep_stale_calls()
+        assert "CAold" not in mgr._caller_info

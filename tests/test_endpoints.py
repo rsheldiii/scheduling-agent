@@ -7,7 +7,7 @@ HTTP layer, request validation, and response formats.
 from __future__ import annotations
 
 import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -115,3 +115,145 @@ class TestOutgoingCallEndpoint:
         assert "call_id" in data
 
 
+class TestIncomingCallEndpoint:
+    @pytest.mark.asyncio
+    async def test_incoming_call_returns_twiml(self, client):
+        """Should return valid TwiML with a media stream URL."""
+        with patch("src.server._lookup_caller_name", new=AsyncMock(return_value=None)):
+            resp = await client.post(
+                "/incoming-call",
+                content="From=%2B14155551234&CallSid=CAtest123",
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+        assert resp.status_code == 200
+        assert "text/xml" in resp.headers["content-type"]
+        body = resp.text
+        assert "<Stream" in body
+        assert "/media-stream" in body
+
+    @pytest.mark.asyncio
+    async def test_incoming_call_embeds_call_sid_in_stream_url(self, client):
+        """CallSid should appear as a query param in the stream URL."""
+        with patch("src.server._lookup_caller_name", new=AsyncMock(return_value=None)):
+            resp = await client.post(
+                "/incoming-call",
+                content="From=%2B14155551234&CallSid=CAabc999",
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+        assert "call_sid=CAabc999" in resp.text
+
+    @pytest.mark.asyncio
+    async def test_incoming_call_registers_caller_name(self, client):
+        """Looked-up caller name should be stored in the manager."""
+        import src.server as server_mod
+
+        with patch("src.server._lookup_caller_name", new=AsyncMock(return_value="Jane Smith")):
+            await client.post(
+                "/incoming-call",
+                content="From=%2B14155551234&CallSid=CAnamed123",
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+
+        assert server_mod.manager._caller_info.get("CAnamed123") == "Jane Smith"
+
+    @pytest.mark.asyncio
+    async def test_incoming_call_unknown_caller_stores_none(self, client):
+        """None caller name (lookup returned nothing) should still be registered."""
+        import src.server as server_mod
+
+        with patch("src.server._lookup_caller_name", new=AsyncMock(return_value=None)):
+            await client.post(
+                "/incoming-call",
+                content="From=%2B14155551234&CallSid=CAunknown",
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+
+        assert "CAunknown" in server_mod.manager._caller_info
+        assert server_mod.manager._caller_info["CAunknown"] is None
+
+
+class TestLookupCallerName:
+    @pytest.mark.asyncio
+    async def test_returns_name_on_success(self):
+        """Should extract caller name from a successful Twilio Lookup response."""
+        import httpx
+
+        from src.server import _lookup_caller_name
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "phone_number": "+14155551234",
+            "caller_name": {"caller_name": "Alice Example", "caller_type": "CONSUMER", "error_code": None},
+        }
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client.get = AsyncMock(return_value=mock_response)
+            mock_client_cls.return_value = mock_client
+
+            result = await _lookup_caller_name("+14155551234", "ACtest", "token")
+
+        assert result == "Alice Example"
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_name_unavailable(self):
+        """Should return None when the lookup succeeds but name field is null."""
+        from src.server import _lookup_caller_name
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "phone_number": "+14155551234",
+            "caller_name": {"caller_name": None, "caller_type": None, "error_code": None},
+        }
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client.get = AsyncMock(return_value=mock_response)
+            mock_client_cls.return_value = mock_client
+
+            result = await _lookup_caller_name("+14155551234", "ACtest", "token")
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_on_http_error(self):
+        """Should return None gracefully when Twilio returns a non-200 status."""
+        from src.server import _lookup_caller_name
+
+        mock_response = MagicMock()
+        mock_response.status_code = 404
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client.get = AsyncMock(return_value=mock_response)
+            mock_client_cls.return_value = mock_client
+
+            result = await _lookup_caller_name("+14155551234", "ACtest", "token")
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_on_network_error(self):
+        """Should swallow network exceptions and return None."""
+        import httpx
+
+        from src.server import _lookup_caller_name
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client.get = AsyncMock(side_effect=httpx.ConnectError("timeout"))
+            mock_client_cls.return_value = mock_client
+
+            result = await _lookup_caller_name("+14155551234", "ACtest", "token")
+
+        assert result is None
