@@ -10,11 +10,15 @@ from ...prompts import Prompt, PromptLoader
 from ...tools.common import get_current_time, get_weather
 from ...tools.google_calendar import get_calendar_events
 from ...tools.memory import get_memory, load_memory
-from ...tools.user_info import get_user_info, load_user_info, render_template
+from ...tools.user_info import (
+    load_public_user_info,
+    load_sensitive_user_info,
+    render_template,
+)
 
 _prompts = PromptLoader(Path(__file__).parent / "prompts")
 
-_SHARED_TOOLS: list[Any] = [get_weather, get_current_time, get_user_info, get_calendar_events, get_memory]
+_SHARED_TOOLS: list[Any] = [get_weather, get_current_time, get_calendar_events, get_memory]
 
 _PHONE_PERSONA = """\
 You are on a real phone call with a real person. You must sound exactly like a \
@@ -59,8 +63,11 @@ def _memory_block() -> str:
 
 
 def create_incoming_call_agent(caller_name: str | None = None) -> AgentWithVoice:
-    """Create a RealtimeAgent configured for handling incoming calls."""
-    user_info = load_user_info()
+    """Create a RealtimeAgent for incoming calls.
+
+    Only public user info is injected — no sensitive fields are available.
+    """
+    public_info = load_public_user_info()
     prompt = _prompts.get("default", category="incoming")
     if caller_name:
         caller_context = (
@@ -72,7 +79,7 @@ def create_incoming_call_agent(caller_name: str | None = None) -> AgentWithVoice
             "You don't know who is calling. "
             "Greet them warmly and find out who they are and what they need."
         )
-    template_vars = {**user_info, "caller_context": caller_context}
+    template_vars = {**public_info, "caller_context": caller_context}
     instructions = _PHONE_PERSONA + _memory_block() + render_template(prompt.instructions, template_vars)
     agent = RealtimeAgent(
         name=prompt.name,
@@ -86,11 +93,18 @@ def create_outgoing_call_agent(
     prompt_key: str | None = None,
     additional_context: str | None = None,
 ) -> AgentWithVoice:
-    """Create a RealtimeAgent configured for making outgoing calls."""
-    user_info = load_user_info()
+    """Create a RealtimeAgent for outgoing calls.
+
+    Public user info is always injected. Sensitive fields are only injected
+    when explicitly declared via ``sensitive_fields`` in the scenario's prompt YAML.
+    """
+    public_info = load_public_user_info()
+    sensitive_info = load_sensitive_user_info()
     prompt = _prompts.get(prompt_key or "doctor_appointment", category="outgoing")
+    scenario_sensitive = {k: v for k, v in sensitive_info.items() if k in prompt.sensitive_fields}
     template_vars = {
-        **user_info,
+        **public_info,
+        **scenario_sensitive,
         "additional_context": additional_context or "No additional context provided.",
     }
     instructions = _PHONE_PERSONA + _memory_block() + render_template(prompt.instructions, template_vars)
