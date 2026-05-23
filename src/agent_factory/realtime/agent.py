@@ -58,11 +58,22 @@ def _memory_block() -> str:
     return f"\nPAST CALL MEMORY:\n{memory}\n"
 
 
-def create_incoming_call_agent() -> AgentWithVoice:
+def create_incoming_call_agent(caller_name: str | None = None) -> AgentWithVoice:
     """Create a RealtimeAgent configured for handling incoming calls."""
     user_info = load_user_info()
     prompt = _prompts.get("default", category="incoming")
-    instructions = _PHONE_PERSONA + _memory_block() + render_template(prompt.instructions, user_info)
+    if caller_name:
+        caller_context = (
+            f"The caller has been identified as {caller_name}. "
+            "You may greet them by name."
+        )
+    else:
+        caller_context = (
+            "You don't know who is calling. "
+            "Greet them warmly and find out who they are and what they need."
+        )
+    template_vars = {**user_info, "caller_context": caller_context}
+    instructions = _PHONE_PERSONA + _memory_block() + render_template(prompt.instructions, template_vars)
     agent = RealtimeAgent(
         name=prompt.name,
         instructions=instructions,

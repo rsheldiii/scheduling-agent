@@ -7,6 +7,7 @@ import time
 import uuid
 from functools import lru_cache
 
+import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import PlainTextResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -130,15 +131,48 @@ class OutgoingCallRequest(BaseModel):
 _PENDING_CALL_TTL = 5 * 60  # seconds
 
 
+async def _lookup_caller_name(from_number: str, account_sid: str, auth_token: str) -> str | None:
+    """Look up the caller's name via the Twilio Lookup v2 API.
+
+    Returns None if the name is unavailable or the request fails.
+    """
+    url = f"https://lookups.twilio.com/v2/PhoneNumbers/{from_number}"
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.get(
+                url,
+                params={"Fields": "caller_name"},
+                auth=(account_sid, auth_token),
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                caller_name_obj = data.get("caller_name") or {}
+                return caller_name_obj.get("caller_name")  # str or None
+            logger.warning("Caller ID lookup returned HTTP %s for %s", resp.status_code, from_number)
+    except Exception:
+        logger.warning("Caller ID lookup failed for %s", from_number, exc_info=True)
+    return None
+
+
 class TwilioWebSocketManager:
     def __init__(self) -> None:
         self._pending_calls: dict[str, dict[str, str | None]] = {}
         self._pending_call_times: dict[str, float] = {}
         self._completion_futures: dict[str, asyncio.Future[str]] = {}
+        self._caller_info: dict[str, str | None] = {}
+        self._caller_info_times: dict[str, float] = {}
 
     def register_pending_call(self, call_id: str, context: dict[str, str | None]) -> None:
         self._pending_calls[call_id] = context
         self._pending_call_times[call_id] = time.monotonic()
+
+    def register_caller_info(self, call_sid: str, caller_name: str | None) -> None:
+        self._caller_info[call_sid] = caller_name
+        self._caller_info_times[call_sid] = time.monotonic()
+
+    def pop_caller_info(self, call_sid: str) -> str | None:
+        self._caller_info_times.pop(call_sid, None)
+        return self._caller_info.pop(call_sid, None)
 
     def _sweep_stale_calls(self) -> None:
         now = time.monotonic()
@@ -150,6 +184,11 @@ class TwilioWebSocketManager:
             if future and not future.done():
                 future.cancel()
             logger.warning("Swept stale pending call: %s", cid)
+
+        stale_info = [sid for sid, t in self._caller_info_times.items() if now - t > _PENDING_CALL_TTL]
+        for sid in stale_info:
+            self._caller_info.pop(sid, None)
+            self._caller_info_times.pop(sid, None)
 
     def register_completion_future(self, call_id: str) -> asyncio.Future[str]:
         """Create a Future that will be resolved when the call completes."""
@@ -164,7 +203,7 @@ class TwilioWebSocketManager:
             future.set_result(summary)
 
     async def new_session(
-        self, websocket: WebSocket, call_id: str | None = None
+        self, websocket: WebSocket, call_id: str | None = None, call_sid: str | None = None
     ) -> tuple[TwilioHandler, str | None]:
         """Create a new TwilioHandler session.
 
@@ -183,8 +222,9 @@ class TwilioWebSocketManager:
             voice = request_voice or result.voice
             return TwilioHandler(websocket, result.agent, voice=voice), request_id
         else:
-            logger.info("Creating incoming call handler")
-            result = create_incoming_call_agent()
+            caller_name = self.pop_caller_info(call_sid) if call_sid else None
+            logger.info("Creating incoming call handler (caller=%s)", caller_name or "unknown")
+            result = create_incoming_call_agent(caller_name=caller_name)
             voice = result.voice
             request_id = None
 
@@ -223,6 +263,18 @@ async def prompts() -> list[dict]:
 async def incoming_call(request: Request) -> PlainTextResponse:
     """Handle incoming Twilio phone calls."""
     host = request.headers.get("Host")
+    form = await request.form()
+    from_number = str(form.get("From", ""))
+    call_sid = str(form.get("CallSid", ""))
+
+    if from_number and call_sid:
+        cfg = _get_config()
+        account_sid = cfg["twilio_account_sid"]
+        auth_token = cfg["twilio_auth_token"]
+        if account_sid and auth_token:
+            caller_name = await _lookup_caller_name(from_number, account_sid, auth_token)
+            manager.register_caller_info(call_sid, caller_name)
+            logger.info("Caller ID for %s: %s (call_sid=%s)", from_number, caller_name or "unknown", call_sid)
 
     response = VoiceResponse()
     response.say(
@@ -235,7 +287,10 @@ async def incoming_call(request: Request) -> PlainTextResponse:
         voice="Google.en-US-Chirp3-HD-Aoede",
     )
     connect = Connect()
-    connect.stream(url=f"wss://{host}/media-stream")
+    stream_url = f"wss://{host}/media-stream"
+    if call_sid:
+        stream_url += f"?call_sid={call_sid}"
+    connect.stream(url=stream_url)
     response.append(connect)
     return PlainTextResponse(content=str(response), media_type="text/xml")
 
@@ -298,9 +353,11 @@ async def outgoing_call(request: Request, body: OutgoingCallRequest) -> dict[str
 
 
 
-async def _handle_media_stream(websocket: WebSocket, call_id: str | None = None) -> None:
+async def _handle_media_stream(
+    websocket: WebSocket, call_id: str | None = None, call_sid: str | None = None
+) -> None:
     """Shared handler for Twilio Media Stream WebSocket connections."""
-    handler, request_id = await manager.new_session(websocket, call_id=call_id)
+    handler, request_id = await manager.new_session(websocket, call_id=call_id, call_sid=call_sid)
     try:
         async with handler:
             await handler.wait_until_done()
@@ -326,7 +383,8 @@ async def _handle_media_stream(websocket: WebSocket, call_id: str | None = None)
 @app.websocket("/media-stream")
 async def media_stream_endpoint(websocket: WebSocket) -> None:
     """WebSocket endpoint for incoming calls (no call_id)."""
-    await _handle_media_stream(websocket)
+    call_sid = websocket.query_params.get("call_sid")
+    await _handle_media_stream(websocket, call_sid=call_sid)
 
 
 @app.websocket("/media-stream/{call_id}")
