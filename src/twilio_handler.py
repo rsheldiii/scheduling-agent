@@ -219,10 +219,20 @@ class TwilioHandler:
         fully streamed to Twilio (the model generates audio first, then calls
         the tool in the same turn).  We just need to wait for the pending
         Twilio marks to drain, confirming the audio was actually played.
+
+        Also enforces a hard ceiling of ``MAX_CALL_DURATION_SECONDS`` (default 600)
+        so a stuck or runaway call cannot linger indefinitely.
         """
         try:
-            await self._end_call_event.wait()
-            logger.info("end_call triggered, waiting for Twilio playback to finish")
+            max_duration = float(os.getenv("MAX_CALL_DURATION_SECONDS", "600"))
+            try:
+                async with asyncio.timeout(max_duration):
+                    await self._end_call_event.wait()
+                logger.info("end_call triggered, waiting for Twilio playback to finish")
+            except TimeoutError:
+                logger.warning(
+                    "Max call duration (%.0fs) reached — hanging up", max_duration
+                )
             await self._wait_for_marks_drained(timeout=10.0)
             logger.info("Closing Twilio WebSocket")
             await self.twilio_websocket.close()
