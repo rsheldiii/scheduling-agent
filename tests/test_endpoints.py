@@ -197,9 +197,17 @@ class TestSanitizeCallerName:
         from src.server import _sanitize_caller_name
         assert _sanitize_caller_name("  Bob  ") == "Bob"
 
-    def test_empty_string(self):
+    def test_none_input_returns_none(self):
         from src.server import _sanitize_caller_name
-        assert _sanitize_caller_name("") == ""
+        assert _sanitize_caller_name(None) is None
+
+    def test_empty_string_returns_none(self):
+        from src.server import _sanitize_caller_name
+        assert _sanitize_caller_name("") is None
+
+    def test_all_stripped_chars_returns_none(self):
+        from src.server import _sanitize_caller_name
+        assert _sanitize_caller_name("{{{") is None
 
     @pytest.mark.asyncio
     async def test_incoming_call_sanitizes_caller_name(self, client):
