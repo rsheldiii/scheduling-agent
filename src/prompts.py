@@ -13,6 +13,7 @@ class Prompt:
     description: str
     instructions: str
     required_context: list[str] = field(default_factory=list)
+    sensitive_fields: list[str] = field(default_factory=list)
     voice: str | None = None
 
 
@@ -46,6 +47,7 @@ class PromptLoader:
             description=data["description"],
             instructions=data["instructions"].strip(),
             required_context=data.get("required_context", []),
+            sensitive_fields=data.get("sensitive_fields", []),
             voice=data.get("voice"),
         )
 

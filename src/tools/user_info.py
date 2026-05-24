@@ -9,7 +9,6 @@ import sys
 from pathlib import Path
 
 import yaml
-from agents import function_tool
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives.hashes import SHA256
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
@@ -24,7 +23,9 @@ _PBKDF2_ITERATIONS = 600_000
 
 logger = logging.getLogger(__name__)
 
-_cached_user_info: dict[str, str] | None = None
+# Separate caches for each tier — populated together on first load.
+_cached_public: dict[str, str] | None = None
+_cached_sensitive: dict[str, str] | None = None
 
 
 def _derive_key(password: str, salt: bytes) -> bytes:
@@ -64,7 +65,12 @@ def encrypt_file(
 def decrypt_and_load(
     encrypted_path: Path = _ENCRYPTED_PATH,
     password: str | None = None,
-) -> dict[str, str]:
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Decrypt and return ``(public, sensitive)`` field dicts.
+
+    The YAML must have top-level ``public:`` and ``sensitive:`` sections.
+    A legacy flat dict is treated as entirely public for backward compatibility.
+    """
     password = password or get_secret("user_info_secret", _ENV_VAR)
     if not password:
         raise ValueError(
@@ -82,27 +88,48 @@ def decrypt_and_load(
         raise ValueError("Decryption failed — wrong password or corrupted file")
 
     data = yaml.safe_load(plaintext)
-    return {str(k): str(v) for k, v in data.items()}
+    if isinstance(data, dict) and ("public" in data or "sensitive" in data):
+        public = {str(k): str(v) for k, v in (data.get("public") or {}).items()}
+        sensitive = {str(k): str(v) for k, v in (data.get("sensitive") or {}).items()}
+    else:
+        # Legacy flat format — treat everything as public.
+        public = {str(k): str(v) for k, v in data.items()}
+        sensitive = {}
+    return public, sensitive
 
 
-def load_user_info() -> dict[str, str]:
-    """Load and cache decrypted user info. Returns empty dict on failure."""
-    global _cached_user_info
-    if _cached_user_info is not None:
-        return _cached_user_info
+def _load_all() -> None:
+    """Decrypt and cache both tiers. No-op if already loaded."""
+    global _cached_public, _cached_sensitive
+    if _cached_public is not None:
+        return
 
     if not _ENCRYPTED_PATH.exists():
         logger.warning("%s not found — user info unavailable", _ENCRYPTED_PATH)
-        _cached_user_info = {}
-        return _cached_user_info
+        _cached_public = {}
+        _cached_sensitive = {}
+        return
 
     try:
-        _cached_user_info = decrypt_and_load()
+        _cached_public, _cached_sensitive = decrypt_and_load()
     except Exception as e:
         logger.warning("Could not load user info: %s", e)
-        _cached_user_info = {}
+        _cached_public = {}
+        _cached_sensitive = {}
 
-    return _cached_user_info
+
+def load_public_user_info() -> dict[str, str]:
+    """Return non-sensitive user fields (name, age, DOB, etc.). Safe for all agents."""
+    _load_all()
+    assert _cached_public is not None
+    return _cached_public
+
+
+def load_sensitive_user_info() -> dict[str, str]:
+    """Return sensitive user fields (SSN, CC info, etc.). For outgoing agents only."""
+    _load_all()
+    assert _cached_sensitive is not None
+    return _cached_sensitive
 
 
 def render_template(template: str, user_info: dict[str, str]) -> str:
@@ -116,17 +143,6 @@ def render_template(template: str, user_info: dict[str, str]) -> str:
         return user_info[key] if key in user_info else match.group(0)
 
     return re.sub(r"\{(\w+)\}", replacer, template)
-
-
-@function_tool
-def get_user_info(field: str) -> str:
-    """Look up a piece of personal information about the user, such as
-    'name', 'date_of_birth', 'ssn_last_four', etc."""
-    info = load_user_info()
-    if field in info:
-        return str(info[field])
-    available = ", ".join(sorted(info.keys()))
-    return f"No information found for '{field}'. Available fields: {available}"
 
 
 def _cli() -> None:
@@ -147,8 +163,8 @@ def _cli() -> None:
         if not _ENCRYPTED_PATH.exists():
             print(f"Error: {_ENCRYPTED_PATH} not found")
             sys.exit(1)
-        info = decrypt_and_load()
-        print(yaml.dump(info, default_flow_style=False))
+        public, sensitive = decrypt_and_load()
+        print(yaml.dump({"public": public, "sensitive": sensitive}, default_flow_style=False))
 
 
 if __name__ == "__main__":
