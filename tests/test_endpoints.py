@@ -172,6 +172,53 @@ class TestIncomingCallEndpoint:
         assert server_mod.manager._caller_info["CAunknown"] is None
 
 
+class TestSanitizeCallerName:
+    def test_normal_name_unchanged(self):
+        from src.server import _sanitize_caller_name
+        assert _sanitize_caller_name("Jane Smith") == "Jane Smith"
+
+    def test_name_with_allowed_punctuation(self):
+        from src.server import _sanitize_caller_name
+        assert _sanitize_caller_name("O'Brien-Smith, Jr.") == "O'Brien-Smith Jr."
+
+    def test_strips_disallowed_characters(self):
+        from src.server import _sanitize_caller_name
+        result = _sanitize_caller_name("Alice\x00{inject}")
+        assert "\x00" not in result
+        assert "{" not in result
+        assert "}" not in result
+
+    def test_caps_at_max_length(self):
+        from src.server import _sanitize_caller_name
+        long_name = "A" * 200
+        assert len(_sanitize_caller_name(long_name)) == 64
+
+    def test_strips_leading_trailing_whitespace(self):
+        from src.server import _sanitize_caller_name
+        assert _sanitize_caller_name("  Bob  ") == "Bob"
+
+    def test_empty_string(self):
+        from src.server import _sanitize_caller_name
+        assert _sanitize_caller_name("") == ""
+
+    @pytest.mark.asyncio
+    async def test_incoming_call_sanitizes_caller_name(self, client):
+        """Stored caller name must be the sanitized version."""
+        import src.server as server_mod
+
+        with patch("src.server._lookup_caller_name", new=AsyncMock(return_value="Evil\x00{Name}")):
+            await client.post(
+                "/incoming-call",
+                content="From=%2B14155551234&CallSid=CAsanitize",
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+
+        stored = server_mod.manager._caller_info.get("CAsanitize")
+        assert stored is not None
+        assert "\x00" not in stored
+        assert "{" not in stored
+
+
 class TestLookupCallerName:
     @pytest.mark.asyncio
     async def test_returns_name_on_success(self):
