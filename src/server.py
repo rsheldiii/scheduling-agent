@@ -1,4 +1,5 @@
 import asyncio
+import collections
 import logging
 import os
 import re
@@ -129,6 +130,29 @@ class OutgoingCallRequest(BaseModel):
 
 
 _PENDING_CALL_TTL = 5 * 60  # seconds
+
+# Per-caller incoming call rate limit: tracks call timestamps per phone number.
+_incoming_call_timestamps: dict[str, collections.deque[float]] = collections.defaultdict(
+    collections.deque
+)
+
+
+def _check_incoming_rate_limit(from_number: str) -> None:
+    """Raise 429 if this caller has exceeded the per-hour incoming call limit.
+
+    Keyed by E.164 phone number so each caller has an independent window.
+    Configurable via RATE_LIMIT_INCOMING_CALLS_PER_HOUR (default: 10).
+    """
+    limit = int(os.getenv("RATE_LIMIT_INCOMING_CALLS_PER_HOUR", "10"))
+    now = time.monotonic()
+    timestamps = _incoming_call_timestamps[from_number]
+    cutoff = now - 3600
+    while timestamps and timestamps[0] < cutoff:
+        timestamps.popleft()
+    if len(timestamps) >= limit:
+        raise HTTPException(status_code=429, detail="Rate limit exceeded for this caller")
+    timestamps.append(now)
+
 
 _CALLER_NAME_SAFE_RE = re.compile(r"[^\w\s'\-.]", re.UNICODE)
 _MAX_CALLER_NAME_LEN = 64
@@ -280,6 +304,9 @@ async def incoming_call(request: Request) -> PlainTextResponse:
     form = await request.form()
     from_number = str(form.get("From", ""))
     call_sid = str(form.get("CallSid", ""))
+
+    if from_number:
+        _check_incoming_rate_limit(from_number)
 
     if from_number and call_sid:
         cfg = _get_config()
