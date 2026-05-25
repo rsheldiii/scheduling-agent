@@ -7,7 +7,8 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from .server import app, _get_bearer_token
+from .auth import _get_bearer_token
+from .server import app
 from .mcp_server import mcp
 
 logger = logging.getLogger(__name__)

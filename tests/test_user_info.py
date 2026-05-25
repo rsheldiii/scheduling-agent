@@ -1,4 +1,4 @@
-"""Tests for src.tools.user_info — encryption, decryption, render_template, tiered loading."""
+"""Tests for src.tools.user_info — encryption, decryption, tiered loading; and src.prompts — render_template."""
 
 from __future__ import annotations
 
@@ -10,10 +10,10 @@ import pytest
 import yaml
 
 import src.tools.user_info as ui_module
+from src.prompts import render_template
 from src.tools.user_info import (
     decrypt_and_load,
     encrypt_file,
-    render_template,
 )
 
 

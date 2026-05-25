@@ -1,63 +1,27 @@
-import asyncio
-import collections
 import logging
 import os
 import re
-import secrets
-import time
 import uuid
 from functools import lru_cache
 
-import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import PlainTextResponse
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, field_validator
-from slowapi import Limiter
-from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
-from starlette.responses import Response
 from twilio.request_validator import RequestValidator
 from twilio.rest import Client as TwilioClient
 from twilio.twiml.voice_response import Connect, VoiceResponse
 
-from .agent_factory.realtime.agent import create_incoming_call_agent, create_outgoing_call_agent, list_outgoing_prompts
 from .agent_factory.post_call.agent import run_post_call_agent
+from .agent_factory.realtime.agent import list_outgoing_prompts
+from .auth import _validate_bearer_token
+from .call_registry import manager
+from .caller_id import _lookup_caller_name, _sanitize_caller_name
 from .persistence import init_db
+from .rate_limit import _call_rate_limit, _check_incoming_rate_limit, limiter, setup_limiter
 from .secrets import get_secret
 from .twilio_handler import TwilioHandler
 
 logger = logging.getLogger(__name__)
-
-_bearer_scheme = HTTPBearer()
-
-def _rate_limit_key(request: Request) -> str:
-    """Use the bearer token as the rate-limit key so limits are per-token."""
-    auth = request.headers.get("Authorization", "")
-    if auth.startswith("Bearer "):
-        return auth[len("Bearer "):]
-    return get_remote_address(request)
-
-_limiter = Limiter(key_func=_rate_limit_key)
-
-
-@lru_cache
-def _get_bearer_token() -> str:
-    """Return the API bearer token, generating one if not configured."""
-    token = get_secret("api_bearer_token", "API_BEARER_TOKEN")
-    if token:
-        return token
-    token = secrets.token_urlsafe(32)
-    logger.warning("API_BEARER_TOKEN not set — generated token: %s", token)
-    return token
-
-
-async def _validate_bearer_token(
-    credentials: HTTPAuthorizationCredentials = Depends(_bearer_scheme),
-) -> None:
-    """FastAPI dependency that validates the Authorization: Bearer header."""
-    if credentials.credentials != _get_bearer_token():
-        raise HTTPException(status_code=401, detail="Invalid bearer token")
 
 
 @lru_cache
@@ -93,7 +57,6 @@ async def _validate_twilio_signature(request: Request) -> None:
     validator = RequestValidator(auth_token)
     signature = request.headers.get("X-Twilio-Signature", "")
 
-    # Twilio sends POST form data; we need the form params for validation
     form = await request.form()
     params = {k: str(v) for k, v in form.items()}
     url = str(request.url)
@@ -129,153 +92,8 @@ class OutgoingCallRequest(BaseModel):
         return v
 
 
-_PENDING_CALL_TTL = 5 * 60  # seconds
-
-# Per-caller incoming call rate limit: tracks call timestamps per phone number.
-_incoming_call_timestamps: dict[str, collections.deque[float]] = collections.defaultdict(
-    collections.deque
-)
-
-
-def _check_incoming_rate_limit(from_number: str) -> None:
-    """Raise 429 if this caller has exceeded the per-hour incoming call limit.
-
-    Keyed by E.164 phone number so each caller has an independent window.
-    Configurable via RATE_LIMIT_INCOMING_CALLS_PER_HOUR (default: 10).
-    """
-    limit = int(os.getenv("RATE_LIMIT_INCOMING_CALLS_PER_HOUR", "10"))
-    now = time.monotonic()
-    timestamps = _incoming_call_timestamps[from_number]
-    cutoff = now - 3600
-    while timestamps and timestamps[0] < cutoff:
-        timestamps.popleft()
-    if len(timestamps) >= limit:
-        raise HTTPException(status_code=429, detail="Rate limit exceeded for this caller")
-    timestamps.append(now)
-
-
-_CALLER_NAME_SAFE_RE = re.compile(r"[^\w\s'\-.]", re.UNICODE)
-_MAX_CALLER_NAME_LEN = 64
-
-
-def _sanitize_caller_name(name: str | None) -> str | None:
-    """Strip unusual characters and cap length before injecting into a prompt.
-
-    Returns None for None input or names that are empty after sanitization.
-    """
-    if not name:
-        return None
-    sanitized = _CALLER_NAME_SAFE_RE.sub("", name).strip()
-    return sanitized[:_MAX_CALLER_NAME_LEN] or None
-
-
-async def _lookup_caller_name(from_number: str, account_sid: str, auth_token: str) -> str | None:
-    """Look up the caller's name via the Twilio Lookup v2 API.
-
-    Returns None if the name is unavailable or the request fails.
-    """
-    url = f"https://lookups.twilio.com/v2/PhoneNumbers/{from_number}"
-    try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            resp = await client.get(
-                url,
-                params={"Fields": "caller_name"},
-                auth=(account_sid, auth_token),
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                caller_name_obj = data.get("caller_name") or {}
-                return caller_name_obj.get("caller_name")  # str or None
-            logger.warning("Caller ID lookup returned HTTP %s for %s", resp.status_code, from_number)
-    except Exception:
-        logger.warning("Caller ID lookup failed for %s", from_number, exc_info=True)
-    return None
-
-
-class TwilioWebSocketManager:
-    def __init__(self) -> None:
-        self._pending_calls: dict[str, dict[str, str | None]] = {}
-        self._pending_call_times: dict[str, float] = {}
-        self._completion_futures: dict[str, asyncio.Future[str]] = {}
-        self._caller_info: dict[str, str | None] = {}
-        self._caller_info_times: dict[str, float] = {}
-
-    def register_pending_call(self, call_id: str, context: dict[str, str | None]) -> None:
-        self._pending_calls[call_id] = context
-        self._pending_call_times[call_id] = time.monotonic()
-
-    def register_caller_info(self, call_sid: str, caller_name: str | None) -> None:
-        self._caller_info[call_sid] = caller_name
-        self._caller_info_times[call_sid] = time.monotonic()
-
-    def pop_caller_info(self, call_sid: str) -> str | None:
-        self._caller_info_times.pop(call_sid, None)
-        return self._caller_info.pop(call_sid, None)
-
-    def _sweep_stale_calls(self) -> None:
-        now = time.monotonic()
-        stale = [cid for cid, t in self._pending_call_times.items() if now - t > _PENDING_CALL_TTL]
-        for cid in stale:
-            self._pending_calls.pop(cid, None)
-            self._pending_call_times.pop(cid, None)
-            future = self._completion_futures.pop(cid, None)
-            if future and not future.done():
-                future.cancel()
-            logger.warning("Swept stale pending call: %s", cid)
-
-        stale_info = [sid for sid, t in self._caller_info_times.items() if now - t > _PENDING_CALL_TTL]
-        for sid in stale_info:
-            self._caller_info.pop(sid, None)
-            self._caller_info_times.pop(sid, None)
-
-    def register_completion_future(self, call_id: str) -> asyncio.Future[str]:
-        """Create a Future that will be resolved when the call completes."""
-        future: asyncio.Future[str] = asyncio.get_event_loop().create_future()
-        self._completion_futures[call_id] = future
-        return future
-
-    def resolve_call(self, call_id: str, summary: str) -> None:
-        """Resolve the completion Future for a finished call."""
-        future = self._completion_futures.pop(call_id, None)
-        if future and not future.done():
-            future.set_result(summary)
-
-    async def new_session(
-        self, websocket: WebSocket, call_id: str | None = None, call_sid: str | None = None
-    ) -> tuple[TwilioHandler, str | None]:
-        """Create a new TwilioHandler session.
-
-        Returns the handler and the MCP request_id (if this is an MCP-triggered call).
-        """
-        self._sweep_stale_calls()
-        if call_id and call_id in self._pending_calls:
-            context = self._pending_calls.pop(call_id)
-            self._pending_call_times.pop(call_id, None)
-            prompt_key = context.get("prompt")
-            additional_context = context.get("additional_context")
-            request_voice = context.get("voice")
-            request_id = context.get("request_id")
-            logger.info("Creating outgoing call handler (call_id=%s, to=%s, prompt=%s)", call_id, context.get("to"), prompt_key)
-            result = create_outgoing_call_agent(prompt_key=prompt_key, additional_context=additional_context)
-            voice = request_voice or result.voice
-            return TwilioHandler(websocket, result.agent, voice=voice), request_id
-        else:
-            caller_name = self.pop_caller_info(call_sid) if call_sid else None
-            logger.info("Creating incoming call handler (caller=%s)", caller_name or "unknown")
-            result = create_incoming_call_agent(caller_name=caller_name)
-            voice = result.voice
-            request_id = None
-
-        return TwilioHandler(websocket, result.agent, voice=voice), request_id
-
-
-manager = TwilioWebSocketManager()
 app = FastAPI()
-app.state.limiter = _limiter
-app.add_exception_handler(
-    RateLimitExceeded,
-    lambda request, exc: Response("Rate limit exceeded", status_code=429),
-)
+setup_limiter(app)
 
 
 @app.on_event("startup")
@@ -336,13 +154,8 @@ async def incoming_call(request: Request) -> PlainTextResponse:
     return PlainTextResponse(content=str(response), media_type="text/xml")
 
 
-def _call_rate_limit() -> str:
-    limit = os.getenv("RATE_LIMIT_CALLS_PER_HOUR", "30")
-    return f"{limit}/hour"
-
-
 @app.post("/outgoing-call", dependencies=[Depends(_validate_bearer_token)])
-@_limiter.limit(_call_rate_limit)
+@limiter.limit(_call_rate_limit)
 async def outgoing_call(request: Request, body: OutgoingCallRequest) -> dict[str, str | None]:
     """Initiate an outgoing phone call via Twilio."""
     cfg = _get_config()
@@ -393,7 +206,6 @@ async def outgoing_call(request: Request, body: OutgoingCallRequest) -> dict[str
     return {"call_id": call_id, "call_sid": call.sid, "status": call.status}
 
 
-
 async def _handle_media_stream(
     websocket: WebSocket, call_id: str | None = None, call_sid: str | None = None
 ) -> None:
@@ -432,4 +244,3 @@ async def media_stream_endpoint(websocket: WebSocket) -> None:
 async def media_stream_with_call_id_endpoint(websocket: WebSocket, call_id: str) -> None:
     """WebSocket endpoint for outgoing calls (with call_id in path)."""
     await _handle_media_stream(websocket, call_id=call_id)
-

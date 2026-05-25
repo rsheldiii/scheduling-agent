@@ -6,15 +6,11 @@ from typing import Any
 
 from agents.realtime import RealtimeAgent
 
-from ...prompts import Prompt, PromptLoader
+from ...prompts import Prompt, PromptLoader, render_template
 from ...tools.common import get_current_time, get_weather
 from ...tools.google_calendar import get_calendar_events
 from ...tools.memory import get_memory, load_memory
-from ...tools.user_info import (
-    load_public_user_info,
-    load_sensitive_user_info,
-    render_template,
-)
+from ...tools.user_info import load_public_user_info, load_sensitive_user_info
 
 _prompts = PromptLoader(Path(__file__).parent / "prompts")
 
