@@ -130,6 +130,20 @@ class OutgoingCallRequest(BaseModel):
 
 _PENDING_CALL_TTL = 5 * 60  # seconds
 
+_CALLER_NAME_SAFE_RE = re.compile(r"[^\w\s'\-.]", re.UNICODE)
+_MAX_CALLER_NAME_LEN = 64
+
+
+def _sanitize_caller_name(name: str | None) -> str | None:
+    """Strip unusual characters and cap length before injecting into a prompt.
+
+    Returns None for None input or names that are empty after sanitization.
+    """
+    if not name:
+        return None
+    sanitized = _CALLER_NAME_SAFE_RE.sub("", name).strip()
+    return sanitized[:_MAX_CALLER_NAME_LEN] or None
+
 
 async def _lookup_caller_name(from_number: str, account_sid: str, auth_token: str) -> str | None:
     """Look up the caller's name via the Twilio Lookup v2 API.
@@ -272,7 +286,7 @@ async def incoming_call(request: Request) -> PlainTextResponse:
         account_sid = cfg["twilio_account_sid"]
         auth_token = cfg["twilio_auth_token"]
         if account_sid and auth_token:
-            caller_name = await _lookup_caller_name(from_number, account_sid, auth_token)
+            caller_name = _sanitize_caller_name(await _lookup_caller_name(from_number, account_sid, auth_token))
             manager.register_caller_info(call_sid, caller_name)
             logger.info("Caller ID for %s: %s (call_sid=%s)", from_number, caller_name or "unknown", call_sid)
 
