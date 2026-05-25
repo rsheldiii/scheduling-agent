@@ -32,9 +32,10 @@ def _isolate_server(monkeypatch):
     monkeypatch.setenv("DOMAIN", "test.example.com")
     monkeypatch.setenv("API_BEARER_TOKEN", TEST_BEARER_TOKEN)
 
-    import src.server as server_mod
-    server_mod._get_bearer_token.cache_clear()
-    server_mod._incoming_call_timestamps.clear()
+    import src.auth as auth_mod
+    import src.rate_limit as rate_limit_mod
+    auth_mod._get_bearer_token.cache_clear()
+    rate_limit_mod._incoming_call_timestamps.clear()
 
 
 @pytest.fixture()
@@ -237,16 +238,16 @@ class TestIncomingCallRateLimit:
     def test_check_rate_limit_function_directly(self, monkeypatch):
         """Unit test for _check_incoming_rate_limit."""
         from fastapi import HTTPException
-        import src.server as server_mod
-        from src.server import _check_incoming_rate_limit
+        import src.rate_limit as rate_limit_mod
+        from src.rate_limit import _check_incoming_rate_limit
 
         monkeypatch.setenv("RATE_LIMIT_INCOMING_CALLS_PER_HOUR", "2")
-        server_mod._incoming_call_timestamps.clear()
+        rate_limit_mod._incoming_call_timestamps.clear()
 
-        _check_incoming_rate_limit("+15550099")  # call 1 — ok
-        _check_incoming_rate_limit("+15550099")  # call 2 — ok
+        _check_incoming_rate_limit("+15550099")
+        _check_incoming_rate_limit("+15550099")
         with pytest.raises(HTTPException) as exc_info:
-            _check_incoming_rate_limit("+15550099")  # call 3 — rejected
+            _check_incoming_rate_limit("+15550099")
         assert exc_info.value.status_code == 429
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -79,3 +80,15 @@ class PromptLoader:
     def list(self, category: str = "") -> list[Prompt]:
         """Return all prompts, optionally filtered to a *category* subdirectory."""
         return list(self._load(category).values())
+
+
+def render_template(template: str, user_info: dict[str, str]) -> str:
+    """Replace {key} placeholders with values from user_info.
+
+    Unrecognized keys are left as-is so non-template braces are preserved.
+    """
+    def replacer(match: re.Match[str]) -> str:
+        key = match.group(1)
+        return user_info[key] if key in user_info else match.group(0)
+
+    return re.sub(r"\{(\w+)\}", replacer, template)

@@ -4,7 +4,6 @@ import base64
 import json
 import logging
 import os
-import re
 import sys
 from pathlib import Path
 
@@ -130,19 +129,6 @@ def load_sensitive_user_info() -> dict[str, str]:
     _load_all()
     assert _cached_sensitive is not None
     return _cached_sensitive
-
-
-def render_template(template: str, user_info: dict[str, str]) -> str:
-    """Replace {key} placeholders with values from user_info.
-
-    Unrecognized keys are left as-is so non-template braces are preserved.
-    """
-
-    def replacer(match: re.Match[str]) -> str:
-        key = match.group(1)
-        return user_info[key] if key in user_info else match.group(0)
-
-    return re.sub(r"\{(\w+)\}", replacer, template)
 
 
 def _cli() -> None:
