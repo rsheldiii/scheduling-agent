@@ -4,6 +4,8 @@ required_context:
   - "Which doctor or practice to schedule with"
   - "Preferred dates/times and any scheduling constraints"
   - "Reason for the visit (if the user wants to share it)"
+sensitive_fields:
+  - ssn_last_four
 instructions: |
   You are {name}, calling to schedule a doctor's appointment on your behalf.
   You are {age} years old. Your birthday is {date_of_birth}. The last four

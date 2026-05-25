@@ -1,4 +1,4 @@
-"""Tests for src.tools.user_info — encryption, decryption, render_template, get_user_info."""
+"""Tests for src.tools.user_info — encryption, decryption, render_template, tiered loading."""
 
 from __future__ import annotations
 
@@ -19,10 +19,12 @@ from src.tools.user_info import (
 
 @pytest.fixture(autouse=True)
 def _clear_cache():
-    """Reset the module-level user-info cache between tests."""
-    ui_module._cached_user_info = None
+    """Reset both tier caches between tests."""
+    ui_module._cached_public = None
+    ui_module._cached_sensitive = None
     yield
-    ui_module._cached_user_info = None
+    ui_module._cached_public = None
+    ui_module._cached_sensitive = None
 
 
 # -------------------------------------------------------------------------
@@ -56,38 +58,46 @@ class TestRenderTemplate:
 # -------------------------------------------------------------------------
 
 class TestEncryptDecrypt:
-    def test_round_trip(self, tmp_path: Path):
+    def _make_encrypted(self, tmp_path: Path, data: dict, password: str) -> Path:
         plaintext_path = tmp_path / "user_info.yaml"
         encrypted_path = tmp_path / "user_info.yaml.enc"
-        data = {"name": "Alice", "phone_number": "+15551234567"}
         plaintext_path.write_text(yaml.dump(data), encoding="utf-8")
-
-        password = "test-password-123"
         encrypt_file(plaintext_path, encrypted_path, password=password)
+        return encrypted_path
 
-        assert encrypted_path.exists()
-        payload = json.loads(encrypted_path.read_text())
-        assert "salt" in payload
-        assert "data" in payload
+    def test_round_trip_tiered(self, tmp_path: Path):
+        data = {
+            "public": {"name": "Alice", "age": "32"},
+            "sensitive": {"ssn_last_four": "9999"},
+        }
+        enc = self._make_encrypted(tmp_path, data, "pass")
+        public, sensitive = decrypt_and_load(enc, password="pass")
+        assert public == {"name": "Alice", "age": "32"}
+        assert sensitive == {"ssn_last_four": "9999"}
 
-        result = decrypt_and_load(encrypted_path, password=password)
-        assert result["name"] == "Alice"
-        assert result["phone_number"] == "+15551234567"
+    def test_round_trip_public_only(self, tmp_path: Path):
+        data = {"public": {"name": "Bob"}}
+        enc = self._make_encrypted(tmp_path, data, "pass")
+        public, sensitive = decrypt_and_load(enc, password="pass")
+        assert public == {"name": "Bob"}
+        assert sensitive == {}
+
+    def test_legacy_flat_format_treated_as_public(self, tmp_path: Path):
+        """A flat dict (old format) lands entirely in public with empty sensitive."""
+        data = {"name": "Carol", "phone_number": "+15551234567"}
+        enc = self._make_encrypted(tmp_path, data, "pass")
+        public, sensitive = decrypt_and_load(enc, password="pass")
+        assert public == {"name": "Carol", "phone_number": "+15551234567"}
+        assert sensitive == {}
 
     def test_wrong_password_fails(self, tmp_path: Path):
-        plaintext_path = tmp_path / "user_info.yaml"
-        encrypted_path = tmp_path / "user_info.yaml.enc"
-        plaintext_path.write_text(yaml.dump({"key": "value"}), encoding="utf-8")
-
-        encrypt_file(plaintext_path, encrypted_path, password="correct")
-
+        enc = self._make_encrypted(tmp_path, {"public": {"x": "y"}}, "correct")
         with pytest.raises(ValueError, match="Decryption failed"):
-            decrypt_and_load(encrypted_path, password="wrong")
+            decrypt_and_load(enc, password="wrong")
 
     def test_encrypt_no_password_raises(self, tmp_path: Path):
         plaintext_path = tmp_path / "user_info.yaml"
-        plaintext_path.write_text("x: y", encoding="utf-8")
-
+        plaintext_path.write_text("public:\n  x: y", encoding="utf-8")
         with patch.object(ui_module, "get_secret", return_value=None):
             with pytest.raises(ValueError, match="No password"):
                 encrypt_file(plaintext_path, tmp_path / "out.enc")
@@ -95,26 +105,60 @@ class TestEncryptDecrypt:
     def test_decrypt_no_password_raises(self, tmp_path: Path):
         enc_path = tmp_path / "dummy.enc"
         enc_path.write_text(json.dumps({"salt": "AA==", "data": "x"}))
-
         with patch.object(ui_module, "get_secret", return_value=None):
             with pytest.raises(ValueError, match="No password"):
                 decrypt_and_load(enc_path)
 
 
 # -------------------------------------------------------------------------
-# load_user_info
+# load_public_user_info / load_sensitive_user_info
 # -------------------------------------------------------------------------
 
 class TestLoadUserInfo:
+    def _patch_decrypt(self, public: dict, sensitive: dict):
+        return patch.object(
+            ui_module,
+            "decrypt_and_load",
+            return_value=(public, sensitive),
+        )
+
+    def test_public_returns_public_fields(self, tmp_path: Path):
+        fake_enc = tmp_path / "user_info.yaml.enc"
+        fake_enc.write_text("{}")  # content doesn't matter — decrypt is patched
+        with patch.object(ui_module, "_ENCRYPTED_PATH", fake_enc), \
+             self._patch_decrypt({"name": "Alice"}, {"ssn_last_four": "1234"}):
+            result = ui_module.load_public_user_info()
+        assert result == {"name": "Alice"}
+
+    def test_sensitive_returns_sensitive_fields(self, tmp_path: Path):
+        fake_enc = tmp_path / "user_info.yaml.enc"
+        fake_enc.write_text("{}")
+        with patch.object(ui_module, "_ENCRYPTED_PATH", fake_enc), \
+             self._patch_decrypt({"name": "Alice"}, {"ssn_last_four": "1234"}):
+            result = ui_module.load_sensitive_user_info()
+        assert result == {"ssn_last_four": "1234"}
+
+    def test_sensitive_not_in_public(self, tmp_path: Path):
+        fake_enc = tmp_path / "user_info.yaml.enc"
+        fake_enc.write_text("{}")
+        with patch.object(ui_module, "_ENCRYPTED_PATH", fake_enc), \
+             self._patch_decrypt({"name": "Alice"}, {"ssn_last_four": "1234"}):
+            public = ui_module.load_public_user_info()
+            sensitive = ui_module.load_sensitive_user_info()
+        assert "ssn_last_four" not in public
+        assert "name" not in sensitive
+
     def test_returns_empty_when_no_encrypted_file(self, tmp_path: Path):
         with patch.object(ui_module, "_ENCRYPTED_PATH", tmp_path / "missing.enc"):
-            result = ui_module.load_user_info()
-        assert result == {}
+            public = ui_module.load_public_user_info()
+            sensitive = ui_module.load_sensitive_user_info()
+        assert public == {}
+        assert sensitive == {}
 
     def test_caches_result(self, tmp_path: Path):
         with patch.object(ui_module, "_ENCRYPTED_PATH", tmp_path / "missing.enc"):
-            first = ui_module.load_user_info()
-            second = ui_module.load_user_info()
+            first = ui_module.load_public_user_info()
+            second = ui_module.load_public_user_info()
         assert first is second
 
     def test_returns_empty_on_decrypt_failure(self, tmp_path: Path):
@@ -122,29 +166,16 @@ class TestLoadUserInfo:
         enc.write_text("not valid json")
         with patch.object(ui_module, "_ENCRYPTED_PATH", enc), \
              patch.object(ui_module, "get_secret", return_value="password"):
-            result = ui_module.load_user_info()
-        assert result == {}
+            public = ui_module.load_public_user_info()
+            sensitive = ui_module.load_sensitive_user_info()
+        assert public == {}
+        assert sensitive == {}
 
-
-# -------------------------------------------------------------------------
-# get_user_info (function tool)
-# -------------------------------------------------------------------------
-
-class TestGetUserInfo:
-    @pytest.mark.asyncio
-    async def test_returns_known_field(self):
-        from unittest.mock import MagicMock
-        ctx = MagicMock()
-        with patch.object(ui_module, "load_user_info", return_value={"name": "Alice"}):
-            result = await ui_module.get_user_info.on_invoke_tool(ctx, '{"field": "name"}')
-        assert result == "Alice"
-
-    @pytest.mark.asyncio
-    async def test_unknown_field_lists_available(self):
-        from unittest.mock import MagicMock
-        ctx = MagicMock()
-        with patch.object(ui_module, "load_user_info", return_value={"name": "A", "age": "30"}):
-            result = await ui_module.get_user_info.on_invoke_tool(ctx, '{"field": "ssn"}')
-        assert "No information found for 'ssn'" in result
-        assert "age" in result
-        assert "name" in result
+    def test_decrypt_called_once_for_both_tiers(self, tmp_path: Path):
+        fake_enc = tmp_path / "user_info.yaml.enc"
+        fake_enc.write_text("{}")
+        with patch.object(ui_module, "_ENCRYPTED_PATH", fake_enc), \
+             self._patch_decrypt({"name": "X"}, {"ssn_last_four": "0000"}) as mock_decrypt:
+            ui_module.load_public_user_info()
+            ui_module.load_sensitive_user_info()
+        mock_decrypt.assert_called_once()
